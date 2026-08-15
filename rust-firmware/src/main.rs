@@ -4,6 +4,7 @@ mod display;
 mod power;
 mod rtc;
 mod storage;
+mod wifi;
 
 use std::thread;
 use std::time::Duration;
@@ -130,6 +131,46 @@ fn main() -> Result<()> {
     log::info!("Initial display refresh completed");
 
     report_power_state(&mut board)?;
+
+    // Optional Wi-Fi bring-up: connect with credentials stored in NVS
+    // (`wifi_ssid` / `wifi_pass`), then sync the clock over NTP and push the
+    // time into the PCF8563 so it keeps ticking while the device sleeps.
+    // Failure to connect or sync only logs a warning; the rest of the UI
+    // keeps working regardless.
+    let sysloop = esp_idf_svc::eventloop::EspSystemEventLoop::take()?;
+    let _wifi_sta = match counters.wifi_creds() {
+        Ok(Some(creds)) => match wifi::WifiSta::connect(&creds, &sysloop) {
+            Ok(sta) => {
+                match wifi::ntp_sync_and_set_rtc(&mut board.rtc) {
+                    Ok(()) => match board.rtc.read_time() {
+                        Ok(dt) => {
+                            clock = Some(dt);
+                            board.display.render_with_time(&counts, clock.as_ref());
+                            board.display.refresh_partial(CLOCK_RECT)?;
+                            log::info!("Clock region refreshed after NTP sync");
+                        }
+                        Err(err) => log::warn!("PCF8563 read_time after NTP sync failed: {err}"),
+                    },
+                    Err(err) => log::warn!("NTP sync failed: {err}"),
+                }
+                Some(sta)
+            }
+            Err(err) => {
+                log::warn!("Wi-Fi connect failed: {err}");
+                None
+            }
+        },
+        Ok(None) => {
+            log::info!(
+                "No Wi-Fi credentials in NVS; skipping connect (see scripts/gen-nvs-wifi.py)"
+            );
+            None
+        }
+        Err(err) => {
+            log::warn!("Could not read Wi-Fi credentials from NVS: {err}");
+            None
+        }
+    };
 
     let mut led_on = false;
     let mut led_tick = 0u32;

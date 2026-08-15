@@ -22,6 +22,7 @@ esp-idf-hal = { path = "../vendor/esp-idf-hal" }
 [dependencies]
 anyhow = "1"
 esp-idf-svc = { version = "0.52.1", features = ["critical-section"] }
+heapless = "0.9"
 log = "0.4"
 
 [build-dependencies]
