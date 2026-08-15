@@ -1,7 +1,8 @@
 use anyhow::Result;
 use esp_idf_svc::sys::{
     esp_deep_sleep_start, esp_sleep_enable_ext0_wakeup, esp_sleep_enable_gpio_switch,
-    esp_sleep_get_wakeup_cause, gpio_hold_dis, gpio_hold_en,
+    esp_sleep_get_wakeup_cause, esp_sleep_source_t_ESP_SLEEP_WAKEUP_UNDEFINED, gpio_hold_dis,
+    gpio_hold_en,
 };
 
 const GPIO_NUM_17: i32 = 17;
@@ -16,11 +17,13 @@ pub fn release_power_latch_hold() -> Result<()> {
     Ok(())
 }
 
-/// Logs the cause reported by the ROM bootloader (or `Unknown` if the chip
-/// was power-cycled instead of woken from deep sleep).
-pub fn log_wakeup_cause() {
+/// Logs the cause reported by the ROM bootloader and reports whether this
+/// boot is a wake from deep sleep (as opposed to a power-on reset, a fresh
+/// flash, or a reset button press).
+pub fn log_wakeup_cause() -> bool {
     let cause = unsafe { esp_sleep_get_wakeup_cause() };
     log::info!("Wakeup cause raw = 0x{:x}", cause);
+    cause != esp_sleep_source_t_ESP_SLEEP_WAKEUP_UNDEFINED
 }
 
 /// Configures the wake source (ENTER button low on GPIO0) and enters deep

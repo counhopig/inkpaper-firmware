@@ -72,7 +72,7 @@ fn main() -> Result<()> {
     esp_idf_svc::log::EspLogger::initialize_default();
 
     log::info!("Inkpaper NOTE4 Rust bring-up starting");
-    power::log_wakeup_cause();
+    let woke_from_deep_sleep = power::log_wakeup_cause();
     let mut board = Note4Board::take()?;
     log::info!("Power latch is high; rendering Hello world");
 
@@ -97,6 +97,11 @@ fn main() -> Result<()> {
         }
     };
 
+    // Wi-Fi/NTP resync is only needed when the RTC time cannot be trusted:
+    // first boot after flashing, a real power-on reset, or the PCF8563
+    // reporting its battery was lost. A wake from deep sleep with a healthy
+    // RTC should stay off Wi-Fi so ENTER responds immediately.
+    let mut needs_wifi_sync = !woke_from_deep_sleep;
     let mut clock = match board.rtc.read_time() {
         Ok(mut dt) => {
             log::info!(
@@ -111,6 +116,7 @@ fn main() -> Result<()> {
             );
             if dt.voltage_low {
                 log::warn!("PCF8563 VL set (RTC battery low/lost); reseeding from build time");
+                needs_wifi_sync = true;
                 let seeded = DateTime::from_unix(BUILD_EPOCH_SECS);
                 if let Err(err) = board.rtc.write_time(&seeded) {
                     log::warn!("PCF8563 reseed failed: {err}");
@@ -122,6 +128,7 @@ fn main() -> Result<()> {
         }
         Err(err) => {
             log::warn!("PCF8563 read_time failed: {err}");
+            needs_wifi_sync = true;
             None
         }
     };
@@ -136,39 +143,48 @@ fn main() -> Result<()> {
     // (`wifi_ssid` / `wifi_pass`), then sync the clock over NTP and push the
     // time into the PCF8563 so it keeps ticking while the device sleeps.
     // Failure to connect or sync only logs a warning; the rest of the UI
-    // keeps working regardless.
-    let sysloop = esp_idf_svc::eventloop::EspSystemEventLoop::take()?;
-    let _wifi_sta = match counters.wifi_creds() {
-        Ok(Some(creds)) => match wifi::WifiSta::connect(&creds, &sysloop) {
-            Ok(sta) => {
-                match wifi::ntp_sync_and_set_rtc(&mut board.rtc) {
-                    Ok(()) => match board.rtc.read_time() {
-                        Ok(dt) => {
-                            clock = Some(dt);
-                            board.display.render_with_time(&counts, clock.as_ref());
-                            board.display.refresh_partial(CLOCK_RECT)?;
-                            log::info!("Clock region refreshed after NTP sync");
-                        }
-                        Err(err) => log::warn!("PCF8563 read_time after NTP sync failed: {err}"),
-                    },
-                    Err(err) => log::warn!("NTP sync failed: {err}"),
+    // keeps working regardless. Skipped on a deep-sleep wake with a healthy
+    // RTC so ENTER wakes the device up instantly instead of blocking on the
+    // network for several seconds.
+    let _wifi_sta = if !needs_wifi_sync {
+        log::info!("Woke from deep sleep with a healthy RTC; skipping Wi-Fi/NTP resync");
+        None
+    } else {
+        let sysloop = esp_idf_svc::eventloop::EspSystemEventLoop::take()?;
+        match counters.wifi_creds() {
+            Ok(Some(creds)) => match wifi::WifiSta::connect(&creds, &sysloop) {
+                Ok(sta) => {
+                    match wifi::ntp_sync_and_set_rtc(&mut board.rtc) {
+                        Ok(()) => match board.rtc.read_time() {
+                            Ok(dt) => {
+                                clock = Some(dt);
+                                board.display.render_with_time(&counts, clock.as_ref());
+                                board.display.refresh_partial(CLOCK_RECT)?;
+                                log::info!("Clock region refreshed after NTP sync");
+                            }
+                            Err(err) => {
+                                log::warn!("PCF8563 read_time after NTP sync failed: {err}")
+                            }
+                        },
+                        Err(err) => log::warn!("NTP sync failed: {err}"),
+                    }
+                    Some(sta)
                 }
-                Some(sta)
-            }
-            Err(err) => {
-                log::warn!("Wi-Fi connect failed: {err}");
+                Err(err) => {
+                    log::warn!("Wi-Fi connect failed: {err}");
+                    None
+                }
+            },
+            Ok(None) => {
+                log::info!(
+                    "No Wi-Fi credentials in NVS; skipping connect (see scripts/gen-nvs-wifi.py)"
+                );
                 None
             }
-        },
-        Ok(None) => {
-            log::info!(
-                "No Wi-Fi credentials in NVS; skipping connect (see scripts/gen-nvs-wifi.py)"
-            );
-            None
-        }
-        Err(err) => {
-            log::warn!("Could not read Wi-Fi credentials from NVS: {err}");
-            None
+            Err(err) => {
+                log::warn!("Could not read Wi-Fi credentials from NVS: {err}");
+                None
+            }
         }
     };
 
