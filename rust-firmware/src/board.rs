@@ -8,6 +8,7 @@ use esp_idf_svc::hal::units::Hertz;
 
 use crate::button::Button;
 use crate::display::EpdDisplay;
+use crate::power;
 use crate::rtc::{Pcf8563, PCF8563_ADDR};
 pub type BoardAdc = AdcDriver<'static, esp_idf_svc::hal::adc::ADCU1>;
 
@@ -36,6 +37,11 @@ impl Note4Board {
     pub fn take() -> Result<Self> {
         let peripherals = Peripherals::take()?;
         let pins = peripherals.pins;
+
+        // After a deep-sleep wakeup GPIO17 may still be held high by the
+        // RTC slow IO block from the previous session. Releasing the hold
+        // before constructing the PinDriver prevents the two from fighting.
+        power::release_power_latch_hold()?;
 
         let mut power_latch = PinDriver::output(pins.gpio17)?;
         power_latch.set_high()?;

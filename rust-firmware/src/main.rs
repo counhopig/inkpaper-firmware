@@ -1,6 +1,7 @@
 mod board;
 mod button;
 mod display;
+mod power;
 mod rtc;
 mod storage;
 
@@ -21,6 +22,27 @@ const COUNTER_SAVE_IDLE_POLLS: u32 = 50;
 /// Poll cycles between two consecutive `power status` log lines.
 /// 50 × 20 ms = 1 s.
 const STATUS_REPORT_INTERVAL_POLLS: u32 = 50;
+
+/// Poll cycles between two consecutive PCF8563 re-reads.
+/// 60 × 20 ms = 1.2 s, fast enough that the on-screen seconds tick at least
+/// once per refresh.
+const CLOCK_POLL_INTERVAL_POLLS: u32 = 60;
+
+/// Bounding rect for the date/time + RTC status line drawn by
+/// `display::EpdDisplay::draw_clock`. Matches `display.rs` (date 20,4
+/// scale 1; time 20,14 scale 2; status 260,8 scale 1) with margin.
+const CLOCK_RECT: Rect = Rect {
+    x: 16,
+    y: 0,
+    width: 304,
+    height: 32,
+};
+
+/// Hold DOWN for this many poll cycles (× 20 ms) to enter deep sleep.
+/// 150 × 20 ms = 3 s of continuous press, intentionally longer than the
+/// 1 s "long press" already used for full-refresh / clean-ghosting so the
+/// two gestures don't collide.
+const DEEP_SLEEP_HOLD_POLLS: u32 = 150;
 
 /// Epoch seconds captured at firmware build time. Used as the fallback RTC
 /// seed when PCF8563 reports `voltage_low = true` (battery was disconnected
@@ -49,6 +71,7 @@ fn main() -> Result<()> {
     esp_idf_svc::log::EspLogger::initialize_default();
 
     log::info!("Inkpaper NOTE4 Rust bring-up starting");
+    power::log_wakeup_cause();
     let mut board = Note4Board::take()?;
     log::info!("Power latch is high; rendering Hello world");
 
@@ -73,7 +96,7 @@ fn main() -> Result<()> {
         }
     };
 
-    let clock = match board.rtc.read_time() {
+    let mut clock = match board.rtc.read_time() {
         Ok(mut dt) => {
             log::info!(
                 "PCF8563: {:04}-{:02}-{:02} {:02}:{:02}:{:02} vl={}",
@@ -111,7 +134,9 @@ fn main() -> Result<()> {
     let mut led_on = false;
     let mut led_tick = 0u32;
     let mut status_tick = 0u32;
+    let mut clock_tick = 0u32;
     let mut idle_since_save = COUNTER_SAVE_IDLE_POLLS; // mark counters as saved on boot
+    let mut down_held_polls: u32 = 0;
     loop {
         led_tick += 1;
         if led_tick >= 12 {
@@ -130,6 +155,28 @@ fn main() -> Result<()> {
 
         let mut dirty: Vec<Rect> = Vec::new();
         let mut full_refresh = false;
+
+        clock_tick += 1;
+        if clock_tick >= CLOCK_POLL_INTERVAL_POLLS {
+            clock_tick = 0;
+            match board.rtc.read_time() {
+                Ok(dt) => {
+                    let changed = clock
+                        .as_ref()
+                        .map(|prev| {
+                            prev.second != dt.second
+                                || prev.minute != dt.minute
+                                || prev.hour != dt.hour
+                        })
+                        .unwrap_or(true);
+                    if changed {
+                        clock = Some(dt);
+                        dirty.push(CLOCK_RECT);
+                    }
+                }
+                Err(err) => log::warn!("PCF8563 read_time failed: {err}"),
+            }
+        }
 
         if let Some(event) = board.key_enter.poll() {
             match event {
@@ -168,13 +215,28 @@ fn main() -> Result<()> {
                     log::info!("DOWN pressed count={}", counts.down);
                     dirty.push(count_rect(255, 224, counts.down));
                     idle_since_save = 0;
+                    down_held_polls = 1;
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("DOWN long pressed; full refresh to clean ghosting");
                     full_refresh = true;
+                    down_held_polls = down_held_polls.max(1);
                 }
-                ButtonEvent::Released => {}
+                ButtonEvent::Released => {
+                    down_held_polls = 0;
+                }
             }
+        } else if down_held_polls > 0 {
+            // Continue counting polls while DOWN stays low even if no new
+            // button event fires this cycle.
+            down_held_polls = down_held_polls.saturating_add(1);
+        }
+
+        if down_held_polls == DEEP_SLEEP_HOLD_POLLS {
+            log::info!("DOWN held for 3 s; entering deep sleep");
+            board.display.render_with_time(&counts, clock.as_ref());
+            board.display.refresh_full()?;
+            power::enter_deep_sleep_with_button_wake();
         }
 
         if full_refresh {
