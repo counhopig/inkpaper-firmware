@@ -76,14 +76,13 @@ Rust application (main.rs)
 | --- | --- |
 | `rust-firmware/src/main.rs` | 启动、按键事件处理、计数、局刷/全刷循环 |
 | `rust-firmware/src/button.rs` | 按键消抖（20 ms / 4 次确认）、短按与 1 s 长按事件 |
-| `rust-firmware/src/board.rs` | 电源锁存、LED、按键、充电状态 GPIO、I2C0 总线 |
+| `rust-firmware/src/board.rs` | 电源锁存、LED、按键和充电状态 GPIO |
 | `rust-firmware/src/display.rs` | 1bpp 画布、5×7 字模、局刷区域打包、官方 EPD Rust 封装 |
-| `rust-firmware/src/rtc.rs` | PCF8563 BCD 读写、VL 复位时的构建时间 fallback（`from_unix`）|
 | `rust-firmware/components/zectrix_epd/` | 官方 NOTE4 EPD C++ 驱动 + SSD2683 波形表 |
 | `rust-firmware/Cargo.toml` | Rust 依赖 + esp-idf-sys extra_components 配置（生成 `zectrix_epd` FFI） |
 | `rust-firmware/sdkconfig.defaults` | ESP32-S3、DIO、PSRAM、串口等配置 |
 | `rust-firmware/partitions.csv` | 16 MB Flash 分区表 |
-| `scripts/build-rust.ps1` | 激活本机 ESP-IDF 并构建 Rust 固件 |
+| `scripts/build-rust.sh` | 激活本机 ESP-IDF 并构建 Rust 固件（Linux） |
 
 ### 官方 EPD 驱动来源
 
@@ -115,93 +114,94 @@ T zectrix_epd_refresh_full_1bpp
 T zectrix_epd_refresh_partial_1bpp
 ```
 
-## 5. Windows 开发环境
+## 5. Arch Linux 开发环境
 
 已验证组合：
 
 | 项目 | 版本 |
 | --- | --- |
-| 操作系统 | Windows 11 x86-64 |
-| ESP-IDF | 5.5.5（默认安装路径 `C:\Espressif\frameworks\esp-idf-v5.5.5-2`） |
-| Python | 3.11（由 ESP-IDF 管理，环境目录 `C:\Espressif\python_env\idf5.5_py3.11_env\Scripts`） |
-| Rust stable | 主机工具链 |
-| Rust Xtensa | 频道 `esp`（`rust-toolchain.toml`） |
-| `espflash` | 在 `~\.cargo\bin\cargo-espflash.exe` |
-| VS C++ Build Tools | 包含 Windows 11 SDK |
+| 操作系统 | Arch Linux x86-64 |
+| ESP-IDF | 5.5.5（git clone `v5.5.5` 到 `~/esp/esp-idf`，`alias get_idf='. $HOME/esp/esp-idf/export.sh'`） |
+| Python | 由 ESP-IDF 管理（`~/.espressif/python_env/idf5.5_py3.14_env`） |
+| Rust stable | pacman 安装（`rustup`） |
+| Rust Xtensa | 频道 `esp`（`espup install` 安装于 `~/.rustup/toolchains/esp`，含 rust-src） |
+| `espflash` / `cargo-espflash` | 4.5.0（extra 仓库 `espflash` 包） |
+| USB 串口 | USB Serial/JTAG → `/dev/ttyACM0`，用户须加入 `uucp` 组 |
 
 确认环境：
 
-```powershell
-idf.py --version
+```bash
+get_idf && idf.py --version
 rustup toolchain list
 rustc +esp --version
-cargo-espflash --version
+espflash --version
 ```
 
-预期能看到 ESP-IDF 5.5.x、名为 `esp` 的工具链和可运行的 `cargo-espflash`。若缺少：
+预期能看到 ESP-IDF 5.5.x、名为 `esp` 的工具链和可运行的 `espflash`。若缺少：
 
-```powershell
-cargo install cargo-espflash
-espup install
+```bash
+sudo pacman -S espflash espup rustup
+espup install     # 安装 Xtensa Rust 工具链 + xtensa-esp-elf GCC + clang
 ```
 
-如果本机 ESP-IDF 路径或工具链版本不同，需要修改 `scripts/build-rust.ps1` 与 `rust-firmware/.cargo/config.toml`。
+如果本机 ESP-IDF 路径或工具链版本不同，需要修改 `scripts/build-rust.sh`、`rust-firmware/.cargo/config.toml`（`IDF_PATH`、`LIBCLANG_PATH`）。
+
+> **espup 故障排查**：espup 从 GitHub 下载 Xtensa 工具链，RISC-V targets 走 `rustup`。若安装失败，先手动补 RISC-V target：`rustup target add riscv32imc-unknown-none-elf`，再手动下载 Xtensa 工具链（`esp-rs/rust-build` release 的 `rust-<ver>-x86_64-unknown-linux-gnu.tar.xz`）解压后用包内 `install.sh --prefix=~/.rustup/toolchains/esp` 安装，并补 `rust-src-<ver>.tar.xz`（`--strip-components=2` 解压到同一 toolchain 目录，供 build-std 使用）。
 
 ## 6. 首次连接与完整备份
 
 用支持数据传输的 USB-C 线连接，然后：
 
-```powershell
-cargo-espflash board-info --port COMx
+```bash
+espflash board-info --port /dev/ttyACM0
 ```
 
 完整备份：
 
-```powershell
-.\scripts\backup-flash.ps1 -Port COMx
-Get-FileHash .\backups\*.bin -Algorithm SHA256
+```bash
+espflash save-image \
+  --port /dev/ttyACM0 --chip esp32s3 \
+  --flash-size 16mb --flash-mode dio --flash-freq 80mhz \
+  backups/note4-factory-$(date +%Y%m%d-%H%M%S).bin
+sha256sum backups/*.bin > backups/SHA256SUMS
 ```
 
 预期 `backups\note4-factory-YYYYMMDD-HHMMSS.bin` 大小为 `16777216` 字节。备份与 SHA-256 应复制到至少一处物理隔离位置。
 
 ## 7. 构建 Rust 固件
 
-从普通 PowerShell 在仓库根目录运行：
+从普通 shell 在仓库根目录运行：
 
-```powershell
-.\scripts\build-rust.ps1 -Release
+```bash
+./scripts/build-rust.sh --release
 ```
 
-脚本会激活 ESP-IDF，然后在 `rust-firmware` 中执行 `cargo build --release`。Windows 下 ESP-IDF / CMake 的路径长度容易超限，因此 `.cargo/config.toml` 将输出目录固定为：
-
-```text
-D:\espbuild\xtensa-esp32s3-espidf\release\inkpaper-note4
-```
+脚本会激活 ESP-IDF，然后在 `rust-firmware` 中执行 `cargo build --release`。产物在 `rust-firmware/target/xtensa-esp32s3-espidf/release/inkpaper-note4`（Linux 下无 Windows 的路径长度限制，不再需要固定输出目录）。
 
 修改 `Cargo.toml` 中的 extra component 配置后，如果新 FFI 模块没有出现，清理 `esp-idf-sys` 再构建：
 
-```powershell
+```bash
 cd rust-firmware
 cargo clean -p esp-idf-sys
 cd ..
-.\scripts\build-rust.ps1 -Release
+./scripts/build-rust.sh --release
 ```
 
 ## 8. 烧录与串口监视
 
 从仓库根目录执行：
 
-```powershell
-cargo-espflash flash `
-  --port COMx `
-  --chip esp32s3 `
-  --flash-size 16mb `
-  --flash-mode dio `
-  --flash-freq 80mhz `
-  --partition-table .\rust-firmware\partitions.csv `
-  D:\espbuild\xtensa-esp32s3-espidf\release\inkpaper-note4
+```bash
+espflash flash \
+  --port /dev/ttyACM0 \
+  --chip esp32s3 \
+  --flash-size 16mb \
+  --flash-mode dio \
+  --flash-freq 80mhz \
+  --partition-table rust-firmware/partitions.csv \
+  rust-firmware/target/xtensa-esp32s3-espidf/release/inkpaper-note4
 
-cargo-espflash monitor --port COMx
+espflash monitor --port /dev/ttyACM0
 ```
 
 退出 monitor 用 `Ctrl+C`。烧录失败时，先退出 monitor 再重新运行 flash 命令。
@@ -284,20 +284,20 @@ CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
 
 通常是 `esp-idf-sys` 缓存早于 extra component 配置：
 
-```powershell
+```bash
 cd rust-firmware
 cargo clean -p esp-idf-sys
 cd ..
-.\scripts\build-rust.ps1 -Release
+./scripts/build-rust.sh --release
 ```
 
-### `failed to open D:/espbuild/.../.cargo-lock`
+### `.cargo-lock` 或 target 目录被占用
 
-关闭仍在运行的 Cargo、rustc、IDE 检查任务或旧构建进程，然后重试。还要确认当前用户对 `D:\espbuild` 有写权限。
+关闭仍在运行的 Cargo、rustc、IDE 检查任务或旧构建进程，然后重试。
 
-### 无法打开 COM 口
+### 无法打开串口
 
-关闭其他 monitor / 串口工具，重新插拔 USB，检查设备管理器中的端口号。必要时按住 ENTER/BOOT，再触发复位进入下载模式。
+确认用户已加入 `uucp` 组（`sudo usermod -aG uucp $USER` 后重新登录），关闭其他 monitor / 串口工具，重新插拔 USB，用 `ls /dev/ttyACM*` 检查设备节点。必要时按住 ENTER/BOOT，再触发复位进入下载模式。
 
 ### 上电后很快关机
 
@@ -321,9 +321,9 @@ cd ..
 
 ## 13. 提交前检查
 
-```powershell
-cargo +esp fmt --manifest-path .\rust-firmware\Cargo.toml -- --check
-.\scripts\build-rust.ps1 -Release
+```bash
+cargo +esp fmt --manifest-path rust-firmware/Cargo.toml -- --check
+./scripts/build-rust.sh --release
 ```
 
 实机至少检查一次：冷启动、电源保持、初始全刷、三个按键各按一次、USB 重新连接和串口日志。
@@ -334,8 +334,8 @@ cargo +esp fmt --manifest-path .\rust-firmware\Cargo.toml -- --check
 
 只使用该设备**自己的**完整备份：
 
-```powershell
-esptool.py -p COMx -b 921600 write_flash 0x0 .\backups\note4-factory-20260815-213553.bin
+```bash
+esptool.py -p /dev/ttyACM0 -b 921600 write_flash 0x0 backups/note4-factory-20260815-213553.bin
 ```
 
 恢复后重新读取 Flash 或计算备份文件哈希，确认使用了正确镜像。不要把另一台设备或 NOTE4C 的备份写入本机。

@@ -33,7 +33,7 @@ inkpaper/
 │   ├── development-guide.md  完整开发指南（必读）
 │   └── note4-hardware.md     板级 GPIO / 电源轨 / EPD 格式
 ├── rust-firmware/
-│   ├── .cargo/config.toml           输出固定到 D:\espbuild
+│   ├── .cargo/config.toml           构建目标 / IDF 路径 / libclang
 │   ├── Cargo.toml                   依赖 + extra_components (EPD FFI)
 │   ├── Cargo.lock
 │   ├── build.rs                     embuild::espidf::sysenv::output
@@ -52,8 +52,9 @@ inkpaper/
 │       ├── include/zectrix_epd.h
 │       └── private_include/ssd2683_waveform.h
 ├── scripts/
-│   ├── build-rust.ps1               激活 ESP-IDF 5.5.5 并构建
-│   └── backup-flash.ps1             完整 16 MiB Flash 备份
+│   ├── build-rust.sh                激活 ESP-IDF 5.5.5 并构建（Linux）
+│   ├── build-rust.ps1               激活 ESP-IDF 5.5.5 并构建（Windows，遗留）
+│   └── backup-flash.ps1             完整 16 MiB Flash 备份（Windows，遗留）
 ├── vendor/
 │   ├── README.md                    esp-idf-hal 0.46.2 patch 说明
 │   └── esp-idf-hal/                 本地 patch 仓库（含 sdmmc 字段）
@@ -67,43 +68,47 @@ inkpaper/
 
 | 组件 | 版本 / 路径 |
 | --- | --- |
-| 操作系统 | Windows 11 x86-64 |
-| ESP-IDF | 5.5.5（默认 `C:\Espressif\frameworks\esp-idf-v5.5.5-2`）|
-| Python | 3.11（由 ESP-IDF 管理） |
-| Rust 工具链 | 频道 `esp`（Espressif Xtensa，rust-toolchain.toml） |
-| Xtensa GCC | `xtensa-esp-elf` 14.2.0（含 `xtensa-esp32s3-elf-nm/readelf/objdump`） |
-| 烧录工具 | `cargo-espflash`（在 `~/.cargo/bin`） |
-| 构建工具 | Visual Studio C++ Build Tools + Windows 11 SDK |
+| 操作系统 | Arch Linux x86-64 |
+| ESP-IDF | 5.5.5（git clone 到 `~/esp/esp-idf`，`alias get_idf='. $HOME/esp/esp-idf/export.sh'`）|
+| Python | 由 ESP-IDF 管理（`~/.espressif/python_env/idf5.5_py3.14_env`） |
+| Rust 工具链 | 频道 `esp`（Espressif Xtensa 1.95.0.0，espup 安装于 `~/.rustup/toolchains/esp`） |
+| Xtensa GCC | `xtensa-esp-elf` 15.2.0（espup 安装，`~/.rustup/toolchains/esp/xtensa-esp-elf/`）|
+| 烧录工具 | `espflash` / `cargo-espflash` 4.5.0（extra 仓库，pacman 安装） |
+| USB 串口 | USB Serial/JTAG → `/dev/ttyACM0`（用户需在 `uucp` 组） |
 
-如系统上的 ESP-IDF 路径或版本不同，需要同步修改 `scripts/build-rust.ps1` 和 `rust-firmware/.cargo/config.toml`。
+`rust-firmware/.cargo/config.toml` 中的 `LIBCLANG_PATH` 指向本机 espup 的 esp-clang 路径；如工具链版本不同需同步修改。`.cargo/config.toml` 不再指定 `target-dir`，产物在 `rust-firmware/target/` 下。`sdkconfig.defaults` 用 `${CMAKE_CURRENT_SOURCE_DIR}` 变量引用 `partitions.csv`（esp-idf-sys 的 CMake 源码目录在 out 下，深度固定 6 层），因此仓库内不含硬编码的 Windows 路径。
 
 ## 快速开始
 
 第一次刷自己的固件前，先完整备份原厂 16 MiB Flash：
 
-```powershell
-.\scripts\backup-flash.ps1 -Port COMx
-Get-FileHash .\backups\*.bin -Algorithm SHA256
+```bash
+# espflash save-image 完整读取 16 MiB
+espflash save-image \
+  --port /dev/ttyACM0 --chip esp32s3 \
+  --flash-size 16mb --flash-mode dio --flash-freq 80mhz \
+  backups/note4-factory-$(date +%Y%m%d-%H%M%S).bin
+sha256sum backups/*.bin > backups/SHA256SUMS
 ```
 
 构建并烧录：
 
-```powershell
+```bash
 # 构建 release 镜像
-.\scripts\build-rust.ps1 -Release
+./scripts/build-rust.sh --release
 
-# 烧录（已映射到生成路径）
-espflash flash `
-  --port COMx `
-  --chip esp32s3 `
-  --flash-size 16mb `
-  --flash-mode dio `
-  --flash-freq 80mhz `
-  --partition-table .\rust-firmware\partitions.csv `
-  D:\espbuild\xtensa-esp32s3-espidf\release\inkpaper-note4
+# 烧录
+espflash flash \
+  --port /dev/ttyACM0 \
+  --chip esp32s3 \
+  --flash-size 16mb \
+  --flash-mode dio \
+  --flash-freq 80mhz \
+  --partition-table rust-firmware/partitions.csv \
+  rust-firmware/target/xtensa-esp32s3-espidf/release/inkpaper-note4
 
 # 查看日志
-espflash monitor --port COMx
+espflash monitor --port /dev/ttyACM0
 ```
 
 成功标志：电源保持按通、LED 闪烁、串口日志输出按键事件、EPD 完成全刷后显示 `Hello world` + 三个按键计数。
@@ -113,7 +118,7 @@ espflash monitor --port COMx
 - **烧录成功但反复复位** → 确认 `sdkconfig.defaults` 仍为 `CONFIG_ESPTOOLPY_FLASHMODE_DIO=y`（NOTE4 实机不支持 QIO）。
 - **日志说刷新完成但屏幕完全不动** → 确认有编译进静态库的 `libzectrix_epd.a`；`vendor/esp-idf-hal/` 切到正确版本后重跑 `cargo clean -p esp-idf-sys`。
 - **上电后立刻关机** → 确认 `GPIO17` 在启动早期被拉高（GPIO 锁存）。
-- **无法识别 `espflash`/`esptool.py`** → ESP-IDF 环境未激活。先在 PowerShell 中 `. "C:\Espressif\frameworks\esp-idf-v5.5.5-2\export.ps1"`。
+- **无法识别 `espflash`/`esptool.py`** → ESP-IDF 环境未激活。先执行 `get_idf`（或 `. ~/esp/esp-idf/export.sh`）。
 
 ## 版本
 

@@ -1,6 +1,5 @@
 [build]
 target = "xtensa-esp32s3-espidf"
-target-dir = "D:/espbuild"
 
 [target.'cfg(target_os = "espidf")']
 linker = "ldproxy"
@@ -14,5 +13,6 @@ build-std = ["std", "panic_abort"]
 MCU = "esp32s3"
 ESP_IDF_VERSION = "v5.5.5"
 ESP_IDF_TOOLS_INSTALL_DIR = "fromenv"
-IDF_PATH = "C:/Espressif/frameworks/esp-idf-v5.5.5-2"
+IDF_PATH = "${HOME}/esp/esp-idf"
 CARGO_WORKSPACE_DIR = { value = "", relative = true }
+LIBCLANG_PATH = "/home/counhopig/.rustup/toolchains/esp/xtensa-esp32-elf-clang/esp-20.1.1_20250829/esp-clang/lib"
