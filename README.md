@@ -15,10 +15,12 @@
 - 启动后全刷显示 `Hello world` + 三个按键计数；按键短按触发**官方局刷 API** 仅刷新数字区域；长按任意键触发一次全刷清残影。
 - 16 MB Flash + ~12 MB 预留存储分区已固化在 `rust-firmware/partitions.csv`。
 - 完整的 16 MiB 原厂 Flash 已备份（`backups/note4-factory-20260815-213553.bin`，SHA-256 `dbe8b1…d182a`）。
-
+- 按键计数在 NVS 命名空间 `inkpaper` 中以 `u32` 持久化（`storage.rs`），启动时 `load()`、按键静默 1 s 后 `save()`，重启后保留。
+- 串口每 1 s 打印一次 `Power state: charging=… charge_done=… vbat_mV=…`；电池电压走 ESP-IDF 5.x oneshot ADC（`AdcDriver::new(adc1)` + `GPIO4` = ADC1 CH3），单位是经 1:2 分压校正后的 mV。
 ### 尚未完成
+> 备注：以下功能当前**尚未**移植到本仓库：
 
-Wi-Fi 配网、ES8311 音频、RTC（PCF8563）、NFC（GT23SC6699）、电池 ADC 与充电管理、文件系统、休眠和 OTA；内容协议未定（自研 HTTP / Slate 兼容 / 完全离线）。
+Wi-Fi 配网、ES8311 音频、PCF8563 RTC、GT23SC6699 NFC、电池 ADC 与充电管理、文件系统、休眠和 OTA；内容协议未定（自研 HTTP / Slate 兼容 / 完全离线）。
 
 完整的环境、安全事项、构建、烧录、调试与故障排查见 **[docs/development-guide.md](docs/development-guide.md)**。
 
@@ -39,9 +41,10 @@ inkpaper/
 │   ├── sdkconfig.defaults           DIO / 80 MHz / OCT PSRAM / USB Serial/JTAG
 │   ├── src/
 │   │   ├── main.rs                  入口 + 按键事件 + 局刷/全刷循环
-│   │   ├── board.rs                 电源锁存 / LED / 按键 / 充电 GPIO
+│   │   ├── board.rs                 电源锁存 / LED / 按键 / 充电 GPIO / oneshot ADC
 │   │   ├── button.rs                消抖 + 短按/1s 长按
-│   │   └── display.rs               1bpp 画布 + EPD Rust 封装 + 5x7 字模
+│   │   ├── display.rs               1bpp 画布 + EPD Rust 封装 + 5x7 字模
+│   │   └── storage.rs               NVS 持久化按键计数
 │   └── components/zectrix_epd/
 │       ├── CMakeLists.txt
 │       ├── zectrix_epd.cc

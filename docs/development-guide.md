@@ -246,6 +246,13 @@ zectrix_epd_power_off
 - `display.rs::glyph` 是 5×7 字模硬编码表，大写 A-Z、0-9 加小写字母映射为大写；其他字符返回全零。
 - `board.rs::take()` 集中初始化：电源锁存拉高、LED 拉高（熄灭）、AVDD 拉低（关闭）、按键走 `Pull::Up`、`charging` 走 `Pull::Up`、`charge_done` 浮空输入。
 
+### 存储与电源状态
+
+- `storage.rs` 封装默认 NVS 分区（`partitions.csv` 中已声明 `nvs` 24 KiB 分区）；命名空间 `inkpaper`，三个键 `counter_enter / counter_up / counter_down`，类型均为 `u32`。`PersistedCounters::open()` 会调用 `EspDefaultNvsPartition::take()`，自动初始化 NVS flash；`load()` 缺失键视为 0，`save()` 内部走 `set_u32` 并由 esp-idf-svc 自动 `commit`。
+- `board.rs::battery_millivolts()` 走 ESP-IDF 5.x 的 ADC oneshot API：`AdcDriver::new(peripherals.adc1)` 持久化持有 ADC 单元，每次读电时 `Peripherals::steal()` 取出 `GPIO4`（ESP32-S3 上即 ADC1 CH3），临时构造 `AdcChannelDriver::new(&self.adc, gpio4, &BATTERY_ADC_CHANNEL_CONFIG)`。因为 `Note4Board` 全部字段都是 `'static`，把 channel 直接放进 board 会触发借用冲突，所以采用「每次重建 channel」的策略；返回值为 ESP-IDF mV × 2（板载 1:2 分压），并被 `u16::MAX` 钳制。
+- `main.rs` 启动时调用 `PersistedCounters::load()` 读取历史计数；按键后把 `idle_since_save` 清零，连续 50 轮（约 1 s）无新按键后写入 NVS。间隔限制避免频繁触碰 NVS flash。同一计数器驱动 `report_power_state()`，每 50 轮打印一次 `Power state: charging=… charge_done=… vbat_mV=…`，便于串口观察。
+- 充电状态引脚极性：`CHRG_L = GPIO2`，低电平表示正在充电；`STDBY_H = GPIO1`，高电平表示充满。两条信号都在 `board.charging_state()` 中返回，1 s 周期打印一次。
+- `sdkconfig.defaults` 已显式启用 `CONFIG_NVS_ENABLED=y` 与 `CONFIG_ADC_ONESHOT_ENABLED=y`。后续若启用 curve-fitting ADC 校准（ESP32-S3 上以 eFuse 三点拟合），需要再追加 `CONFIG_ADC_CAL_EFUSE_TP_FIT_SUPPORTED=y` 并把 `AdcChannelConfig { calibration: Calibration::Curve, .. }` 写进 `BATTERY_ADC_CHANNEL_CONFIG`。
 ## 11. 常见故障
 
 ### 固件烧录成功但不断复位
@@ -294,13 +301,12 @@ cd ..
 ## 12. 推荐开发顺序
 
 1. 把当前 Hello World + 三按键固件保留为硬件冒烟测试基线。
-2. 按键消抖 / 长按 / 组合键事件层已基本就绪；接下来评估刷新合并的宽限窗口、连续局刷次数限制。
-3. 引入成熟图形库（`embedded-graphics` 已是 `esp-idf-hal` 支持的可选 feature）或建立统一画布、字体和布局层。
-4. NVS 设置、Wi-Fi 配网和时间同步。
-5. 电池 ADC、充电状态、PCF8563 RTC 与低功耗策略。
-6. 音频（I2S + ES8311）、NFC（GT23SC6699）。
-7. 内容协议、内容缓存、文件系统。
-8. OTA、回滚、看门狗和故障恢复。
+2. NVS 设置、Wi-Fi 配网和时间同步（按键计数 NVS 持久化已在 `src/storage.rs` 实现，可作为参考模板）。
+3. 电池 ADC、充电状态、PCF8563 RTC 与低功耗策略（`battery_millivolts()` + `report_power_state()` 已在 `main.rs` 周期打印；进一步可在 GPIO17 失锁前用 RTC GPIO hold 维持主电源）。
+4. 引入成熟图形库（`embedded-graphics` 已是 `esp-idf-hal` 支持的可选 feature）或建立统一画布、字体和布局层。
+5. 音频（I2S + ES8311）、NFC（GT23SC6699）。
+6. 内容协议、内容缓存、文件系统。
+7. OTA、回滚、看门狗和故障恢复。
 
 每加入一个外设，先做独立测试，再接入主应用。显示、电源和休眠改动的风险最高，应始终保留可恢复的串口路径与原厂备份。
 

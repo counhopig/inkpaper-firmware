@@ -1,6 +1,7 @@
 mod board;
 mod button;
 mod display;
+mod storage;
 
 use std::thread;
 use std::time::Duration;
@@ -9,6 +10,15 @@ use anyhow::Result;
 use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
 use display::{ButtonCounts, Rect};
+use storage::PersistedCounters;
+
+/// Save the counters to NVS when at least this many idle polling cycles have
+/// elapsed since the last key event. 50 cycles × 20 ms = 1 s of quiet.
+const COUNTER_SAVE_IDLE_POLLS: u32 = 50;
+
+/// Poll cycles between two consecutive `power status` log lines.
+/// 50 × 20 ms = 1 s.
+const STATUS_REPORT_INTERVAL_POLLS: u32 = 50;
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -18,30 +28,51 @@ fn main() -> Result<()> {
     let mut board = Note4Board::take()?;
     log::info!("Power latch is high; rendering Hello world");
 
-    let mut counts = ButtonCounts {
-        enter: 0,
-        up: 0,
-        down: 0,
+    let counters = PersistedCounters::open()?;
+    let mut counts = match counters.load() {
+        Ok(loaded) => {
+            log::info!(
+                "Loaded persisted counters: enter={} up={} down={}",
+                loaded.enter,
+                loaded.up,
+                loaded.down
+            );
+            loaded
+        }
+        Err(err) => {
+            log::warn!("Could not load persisted counters ({err}); starting from zero");
+            ButtonCounts {
+                enter: 0,
+                up: 0,
+                down: 0,
+            }
+        }
     };
+
     board.display.render(&counts);
     board.display.refresh_full()?;
     log::info!("Initial display refresh completed");
 
-    let (charging, charge_done) = board.charging_state();
-    log::info!(
-        "Power state: charging={} charge_done={}",
-        charging,
-        charge_done
-    );
+    report_power_state(&mut board)?;
 
     let mut led_on = false;
     let mut led_tick = 0u32;
+    let mut status_tick = 0u32;
+    let mut idle_since_save = COUNTER_SAVE_IDLE_POLLS; // mark counters as saved on boot
     loop {
         led_tick += 1;
         if led_tick >= 12 {
             led_tick = 0;
             led_on = !led_on;
             board.set_led(led_on)?;
+        }
+
+        status_tick += 1;
+        if status_tick >= STATUS_REPORT_INTERVAL_POLLS {
+            status_tick = 0;
+            if let Err(err) = report_power_state(&mut board) {
+                log::warn!("Power status probe failed: {err}");
+            }
         }
 
         let mut dirty: Vec<Rect> = Vec::new();
@@ -53,6 +84,7 @@ fn main() -> Result<()> {
                     counts.enter = counts.enter.saturating_add(1);
                     log::info!("ENTER pressed count={}", counts.enter);
                     dirty.push(count_rect(255, 108, counts.enter));
+                    idle_since_save = 0;
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("ENTER long pressed; full refresh to clean ghosting");
@@ -67,6 +99,7 @@ fn main() -> Result<()> {
                     counts.up = counts.up.saturating_add(1);
                     log::info!("UP pressed count={}", counts.up);
                     dirty.push(count_rect(255, 166, counts.up));
+                    idle_since_save = 0;
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("UP long pressed; full refresh to clean ghosting");
@@ -81,6 +114,7 @@ fn main() -> Result<()> {
                     counts.down = counts.down.saturating_add(1);
                     log::info!("DOWN pressed count={}", counts.down);
                     dirty.push(count_rect(255, 224, counts.down));
+                    idle_since_save = 0;
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("DOWN long pressed; full refresh to clean ghosting");
@@ -102,8 +136,43 @@ fn main() -> Result<()> {
             log::info!("Partial display refresh completed");
         }
 
+        if idle_since_save < COUNTER_SAVE_IDLE_POLLS {
+            idle_since_save += 1;
+            if idle_since_save == COUNTER_SAVE_IDLE_POLLS {
+                match counters.save(&counts) {
+                    Ok(()) => log::info!(
+                        "Saved counters to NVS: enter={} up={} down={}",
+                        counts.enter,
+                        counts.up,
+                        counts.down
+                    ),
+                    Err(err) => log::warn!("Failed to persist counters: {err}"),
+                }
+            }
+        }
+
         thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
     }
+}
+
+fn report_power_state(board: &mut Note4Board) -> Result<()> {
+    let (charging, charge_done) = board.charging_state();
+    match board.battery_millivolts() {
+        Ok(vbat_mv) => log::info!(
+            "Power state: charging={} charge_done={} vbat_mV={}",
+            charging,
+            charge_done,
+            vbat_mv
+        ),
+        Err(err) => {
+            log::warn!("Battery ADC read failed: {err}");
+            log::info!(
+                "Power state: charging={} charge_done={} vbat_mV=<n/a>",
+                charging, charge_done
+            );
+        }
+    }
+    Ok(())
 }
 
 fn count_rect(x: u16, y: u16, count: u32) -> Rect {
