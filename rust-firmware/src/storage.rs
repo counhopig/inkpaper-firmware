@@ -77,8 +77,6 @@ impl PersistedCounters {
     }
 
     /// Stores the Wi-Fi credentials in NVS for later connections.
-    /// Reserved for the future provisioning UI / CLI.
-    #[allow(dead_code)]
     pub fn save_wifi_creds(&self, creds: &WifiCreds) -> Result<()> {
         self.nvs
             .set_str(KEY_WIFI_SSID, &creds.ssid)

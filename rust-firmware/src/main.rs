@@ -4,6 +4,7 @@ mod canvas;
 mod display;
 mod font;
 mod power;
+mod provision;
 mod rtc;
 mod storage;
 mod wifi;
@@ -142,6 +143,11 @@ fn main() -> Result<()> {
 
     report_power_state(&mut board)?;
 
+    // Taken once up front (it's a singleton) so both the boot-time Wi-Fi
+    // bring-up below and the on-device Wi-Fi setup wizard (triggered from
+    // the main loop by holding UP) can use it.
+    let sysloop = esp_idf_svc::eventloop::EspSystemEventLoop::take()?;
+
     // Optional Wi-Fi bring-up: connect with credentials stored in NVS
     // (`wifi_ssid` / `wifi_pass`), then sync the clock over NTP and push the
     // time into the PCF8563 so it keeps ticking while the device sleeps.
@@ -153,7 +159,6 @@ fn main() -> Result<()> {
         log::info!("Woke from deep sleep with a healthy RTC; skipping Wi-Fi/NTP resync");
         None
     } else {
-        let sysloop = esp_idf_svc::eventloop::EspSystemEventLoop::take()?;
         match counters.wifi_creds() {
             Ok(Some(creds)) => match wifi::WifiSta::connect(&creds, &sysloop) {
                 Ok(sta) => {
@@ -197,6 +202,7 @@ fn main() -> Result<()> {
     let mut clock_tick = 0u32;
     let mut idle_since_save = COUNTER_SAVE_IDLE_POLLS; // mark counters as saved on boot
     let mut down_held_polls: u32 = 0;
+    let mut up_held_polls: u32 = 0;
     loop {
         led_tick += 1;
         if led_tick >= 12 {
@@ -260,13 +266,28 @@ fn main() -> Result<()> {
                     log::info!("UP pressed count={}", counts.up);
                     dirty.push(count_rect(255, 166, counts.up));
                     idle_since_save = 0;
+                    up_held_polls = 1;
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("UP long pressed; full refresh to clean ghosting");
                     full_refresh = true;
+                    up_held_polls = up_held_polls.max(1);
                 }
-                ButtonEvent::Released => {}
+                ButtonEvent::Released => {
+                    up_held_polls = 0;
+                }
             }
+        } else if up_held_polls > 0 {
+            // Continue counting polls while UP stays low even if no new
+            // button event fires this cycle.
+            up_held_polls = up_held_polls.saturating_add(1);
+        }
+
+        if up_held_polls == provision::ENTER_HOLD_POLLS {
+            log::info!("UP held for 3 s; entering Wi-Fi setup wizard");
+            up_held_polls = 0;
+            provision::run(&mut board, &counters, &sysloop);
+            full_refresh = true;
         }
         if let Some(event) = board.key_down.poll() {
             match event {

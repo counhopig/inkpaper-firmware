@@ -42,6 +42,12 @@ impl EpdDisplay {
         self.render_with_time(counts, None);
     }
 
+    /// Direct canvas access for screens that don't fit the fixed
+    /// `render_with_time` layout, e.g. the Wi-Fi setup wizard.
+    pub fn canvas_mut(&mut self) -> &mut Canvas {
+        &mut self.canvas
+    }
+
     pub fn render_with_time(&mut self, counts: &ButtonCounts, clock: Option<&DateTime>) {
         self.canvas.clear();
         if let Some(dt) = clock {

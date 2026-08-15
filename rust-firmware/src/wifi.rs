@@ -6,7 +6,7 @@ use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::sntp::{EspSntp, SntpConf, SyncStatus};
 use esp_idf_svc::systime::EspSystemTime;
-use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration, EspWifi};
+use esp_idf_svc::wifi::{AccessPointInfo, AuthMethod, ClientConfiguration, Configuration, EspWifi};
 use heapless::String as HeaplessString;
 
 use crate::rtc::{DateTime, Pcf8563};
@@ -108,6 +108,26 @@ impl WifiSta {
 
         Ok(Self { _wifi: wifi })
     }
+}
+
+/// Scans for nearby 2.4 GHz access points and returns them sorted by signal
+/// strength (strongest first), deduplicated by SSID. Used by the on-device
+/// Wi-Fi setup screen so the user picks a network instead of typing an SSID
+/// by hand - the exact step that let a case typo (`XiaoMi_ED4E` vs the
+/// broadcast `Xiaomi_ED4E`) break `connect()` for a full debugging session
+/// (see docs/wifi-connect-issue.md).
+pub fn scan_networks(sysloop: &EspSystemEventLoop) -> Result<Vec<AccessPointInfo>> {
+    let peripherals = unsafe { Peripherals::steal() };
+    let mut wifi = EspWifi::new(peripherals.modem, sysloop.clone(), None)
+        .context("failed to create Wi-Fi driver for scan")?;
+    wifi.set_configuration(&Configuration::Client(ClientConfiguration::default()))
+        .context("failed to set STA mode for scan")?;
+    wifi.start().context("failed to start Wi-Fi for scan")?;
+    let mut aps = wifi.scan().context("Wi-Fi scan failed")?;
+    let _ = wifi.stop();
+    aps.sort_by_key(|ap| std::cmp::Reverse(ap.signal_strength));
+    aps.dedup_by(|a, b| a.ssid == b.ssid);
+    Ok(aps)
 }
 
 /// Starts the SNTP client, waits for the first sync and pushes the obtained
