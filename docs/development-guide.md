@@ -76,8 +76,9 @@ Rust application (main.rs)
 | --- | --- |
 | `rust-firmware/src/main.rs` | 启动、按键事件处理、计数、局刷/全刷循环 |
 | `rust-firmware/src/button.rs` | 按键消抖（20 ms / 4 次确认）、短按与 1 s 长按事件 |
-| `rust-firmware/src/board.rs` | 电源锁存、LED、按键和充电状态 GPIO |
+| `rust-firmware/src/board.rs` | 电源锁存、LED、按键、充电状态 GPIO、I2C0 总线 |
 | `rust-firmware/src/display.rs` | 1bpp 画布、5×7 字模、局刷区域打包、官方 EPD Rust 封装 |
+| `rust-firmware/src/rtc.rs` | PCF8563 BCD 读写、VL 复位时的构建时间 fallback（`from_unix`）|
 | `rust-firmware/components/zectrix_epd/` | 官方 NOTE4 EPD C++ 驱动 + SSD2683 波形表 |
 | `rust-firmware/Cargo.toml` | Rust 依赖 + esp-idf-sys extra_components 配置（生成 `zectrix_epd` FFI） |
 | `rust-firmware/sdkconfig.defaults` | ESP32-S3、DIO、PSRAM、串口等配置 |
@@ -253,6 +254,14 @@ zectrix_epd_power_off
 - `main.rs` 启动时调用 `PersistedCounters::load()` 读取历史计数；按键后把 `idle_since_save` 清零，连续 50 轮（约 1 s）无新按键后写入 NVS。间隔限制避免频繁触碰 NVS flash。同一计数器驱动 `report_power_state()`，每 50 轮打印一次 `Power state: charging=… charge_done=… vbat_mV=…`，便于串口观察。
 - 充电状态引脚极性：`CHRG_L = GPIO2`，低电平表示正在充电；`STDBY_H = GPIO1`，高电平表示充满。两条信号都在 `board.charging_state()` 中返回，1 s 周期打印一次。
 - `sdkconfig.defaults` 已显式启用 `CONFIG_NVS_ENABLED=y` 与 `CONFIG_ADC_ONESHOT_ENABLED=y`。后续若启用 curve-fitting ADC 校准（ESP32-S3 上以 eFuse 三点拟合），需要再追加 `CONFIG_ADC_CAL_EFUSE_TP_FIT_SUPPORTED=y` 并把 `AdcChannelConfig { calibration: Calibration::Curve, .. }` 写进 `BATTERY_ADC_CHANNEL_CONFIG`。
+
+### PCF8563 RTC 与 I2C0
+
+- 总线：`I2C0`，`SDA = GPIO47`、`SCL = GPIO48`、400 kHz 主模式。`board.rs` 在 `_avdd_power`（`GPIO42`，原厂用作音频 + I2C 上拉电源）初始化为高电平后再 `I2cDriver::new`，否则 SDA/SCL 浮空会 NACK。
+- 设备地址：`0x51`（7-bit），`rtc::Pcf8563::probe()` 在板级初始化阶段发一字节读 0x00 作连通性测试；失败会让 `Note4Board::take()` 返回错误。
+- 寄存器布局：BCD，秒/分/时/日/星期/月/年位于 `0x02..=0x08`；`0x00` 的 bit7 是 `voltage_low`，VL=1 表示 RTC 备用电池掉电或首次上电，时间不再可信。
+- `main.rs` 启动顺序：`read_time()` → 打印；`voltage_low` 时调用 `from_unix(BUILD_EPOCH_SECS)` 重新写入（`BUILD_EPOCH_SECS` 由 `build.rs` 用 `SystemTime::now()` 注入到 `cargo:rustc-env`，构建时刷新）。
+- 闹钟与方波：`Pcf8563::clear_alarm()` 在 `board.rs` 启动后清空 `0x09..=0x0C` 闹钟寄存器与 `0x01` 的 AIE 位，避免残留报警打断后续 deep-sleep 唤醒。后续启用 alarm 唤醒时再调用 `set_alarm`。
 ## 11. 常见故障
 
 ### 固件烧录成功但不断复位

@@ -5,6 +5,8 @@ use esp_idf_svc::sys::zectrix_epd::{
     zectrix_epd_refresh_full_1bpp, zectrix_epd_refresh_partial_1bpp,
 };
 
+use crate::rtc::DateTime;
+
 pub const WIDTH: usize = 400;
 pub const HEIGHT: usize = 300;
 const BYTES_PER_ROW: usize = WIDTH / 8;
@@ -45,8 +47,16 @@ impl EpdDisplay {
         })
     }
 
+    #[allow(dead_code)]
     pub fn render(&mut self, counts: &ButtonCounts) {
+        self.render_with_time(counts, None);
+    }
+
+    pub fn render_with_time(&mut self, counts: &ButtonCounts, clock: Option<&DateTime>) {
         self.clear();
+        if let Some(dt) = clock {
+            self.draw_clock(dt);
+        }
         self.draw_text(52, 34, 4, "Hello world");
         self.fill_rect(32, 82, 336, 3, true);
         self.draw_text(36, 108, 3, "ENTER");
@@ -55,6 +65,29 @@ impl EpdDisplay {
         self.draw_text(255, 166, 3, &counts.up.to_string());
         self.draw_text(36, 224, 3, "DOWN");
         self.draw_text(255, 224, 3, &counts.down.to_string());
+    }
+
+    #[allow(dead_code)]
+    pub fn render_clock(&mut self, clock: &DateTime) {
+        self.clear();
+        self.draw_clock(clock);
+    }
+
+    fn draw_clock(&mut self, dt: &DateTime) {
+        let date = format!(
+            "{:04}-{:02}-{:02}",
+            dt.year,
+            dt.month,
+            dt.day
+        );
+        let time = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
+        self.draw_text(20, 4, 1, &date);
+        self.draw_text(20, 14, 2, &time);
+        let mut status = String::from("OK");
+        if dt.voltage_low {
+            status = "LOW!".to_string();
+        }
+        self.draw_text(260, 8, 1, &format!("RTC {}", status));
     }
 
     pub fn refresh_full(&mut self) -> Result<()> {
@@ -203,6 +236,10 @@ fn glyph(character: char) -> [u8; 7] {
         'X' => [0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11],
         'Y' => [0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04],
         'Z' => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F],
+        ':' => [0x00, 0x00, 0x0A, 0x00, 0x0A, 0x00, 0x00],
+        '/' => [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00],
+        '-' => [0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00],
+        ' ' => [0; 7],
         '0' => [0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E],
         '1' => [0x04, 0x0C, 0x14, 0x04, 0x04, 0x04, 0x1F],
         '2' => [0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F],

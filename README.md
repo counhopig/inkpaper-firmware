@@ -17,6 +17,7 @@
 - 完整的 16 MiB 原厂 Flash 已备份（`backups/note4-factory-20260815-213553.bin`，SHA-256 `dbe8b1…d182a`）。
 - 按键计数在 NVS 命名空间 `inkpaper` 中以 `u32` 持久化（`storage.rs`），启动时 `load()`、按键静默 1 s 后 `save()`，重启后保留。
 - 串口每 1 s 打印一次 `Power state: charging=… charge_done=… vbat_mV=…`；电池电压走 ESP-IDF 5.x oneshot ADC（`AdcDriver::new(adc1)` + `GPIO4` = ADC1 CH3），单位是经 1:2 分压校正后的 mV。
+- PCF8563 RTC 挂在 I2C0（`GPIO47`/`GPIO48`，AVDD `GPIO42` 上电拉高），启动时 `read_time()`，若 `voltage_low` 置位则用 `build.rs` 记录的构建 epoch 写入芯片并显示；时间显示在屏幕左上角（`YYYY-MM-DD HH:MM:SS`，RTC 状态文本）。
 ### 尚未完成
 > 备注：以下功能当前**尚未**移植到本仓库：
 

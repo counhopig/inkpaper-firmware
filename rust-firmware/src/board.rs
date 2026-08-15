@@ -1,17 +1,22 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use esp_idf_svc::hal::adc::attenuation::DB_12;
 use esp_idf_svc::hal::adc::oneshot::{config::AdcChannelConfig, AdcChannelDriver, AdcDriver};
 use esp_idf_svc::hal::gpio::{Input, Output, PinDriver, Pull};
+use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_svc::hal::peripherals::Peripherals;
+use esp_idf_svc::hal::units::Hertz;
 
 use crate::button::Button;
 use crate::display::EpdDisplay;
+use crate::rtc::{Pcf8563, PCF8563_ADDR};
 pub type BoardAdc = AdcDriver<'static, esp_idf_svc::hal::adc::ADCU1>;
 
 const BATTERY_ADC_CHANNEL_CONFIG: AdcChannelConfig = AdcChannelConfig {
     attenuation: DB_12,
     ..AdcChannelConfig::new()
 };
+
+const I2C_FREQUENCY: Hertz = Hertz(400_000);
 
 pub struct Note4Board {
     _power_latch: PinDriver<'static, Output>,
@@ -24,6 +29,7 @@ pub struct Note4Board {
     charge_done: PinDriver<'static, Input>,
     adc: BoardAdc,
     pub display: EpdDisplay,
+    pub rtc: Pcf8563<'static>,
 }
 
 impl Note4Board {
@@ -38,7 +44,7 @@ impl Note4Board {
         led.set_high()?;
 
         let mut avdd_power = PinDriver::output(pins.gpio42)?;
-        avdd_power.set_low()?;
+        avdd_power.set_high()?;
 
         let key_enter = Button::new(pins.gpio0.into(), Pull::Up)?;
         let key_up = Button::new(pins.gpio39.into(), Pull::Up)?;
@@ -54,6 +60,20 @@ impl Note4Board {
         // the (consumed) Peripherals handle, which is safe exactly once
         // after `Peripherals::take()` in `Note4Board::take`.
 
+        let i2c_config = I2cConfig::new().baudrate(I2C_FREQUENCY);
+        let i2c = I2cDriver::new(
+            peripherals.i2c0,
+            pins.gpio47,
+            pins.gpio48,
+            &i2c_config,
+        )
+        .context("failed to install I2C0 driver on GPIO47/48")?;
+        let mut rtc = Pcf8563::new(i2c, PCF8563_ADDR);
+        rtc.probe().context("PCF8563 not responding on I2C bus")?;
+        if let Err(err) = rtc.clear_alarm() {
+            log::warn!("PCF8563 clear_alarm failed: {err}");
+        }
+
         Ok(Self {
             _power_latch: power_latch,
             led,
@@ -65,6 +85,7 @@ impl Note4Board {
             charge_done,
             adc,
             display,
+            rtc,
         })
     }
 

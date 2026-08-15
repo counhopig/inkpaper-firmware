@@ -1,6 +1,7 @@
 mod board;
 mod button;
 mod display;
+mod rtc;
 mod storage;
 
 use std::thread;
@@ -10,6 +11,7 @@ use anyhow::Result;
 use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
 use display::{ButtonCounts, Rect};
+use rtc::DateTime;
 use storage::PersistedCounters;
 
 /// Save the counters to NVS when at least this many idle polling cycles have
@@ -19,6 +21,28 @@ const COUNTER_SAVE_IDLE_POLLS: u32 = 50;
 /// Poll cycles between two consecutive `power status` log lines.
 /// 50 × 20 ms = 1 s.
 const STATUS_REPORT_INTERVAL_POLLS: u32 = 50;
+
+/// Epoch seconds captured at firmware build time. Used as the fallback RTC
+/// seed when PCF8563 reports `voltage_low = true` (battery was disconnected
+/// or drained). Captured by `build.rs` so a rebuild refreshes the value;
+/// once the RTC keeps time on its coin cell we stop consulting this.
+const BUILD_EPOCH_SECS: u64 = build_epoch_secs();
+
+#[allow(dead_code)]
+const fn build_epoch_secs() -> u64 {
+    let bytes: &[u8] = env!("BUILD_EPOCH_SECS").as_bytes();
+    let mut i = 0;
+    let mut value: u64 = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if !b.is_ascii_digit() {
+            break;
+        }
+        value = value * 10 + (b - b'0') as u64;
+        i += 1;
+    }
+    value
+}
 
 fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -49,7 +73,36 @@ fn main() -> Result<()> {
         }
     };
 
-    board.display.render(&counts);
+    let clock = match board.rtc.read_time() {
+        Ok(mut dt) => {
+            log::info!(
+                "PCF8563: {:04}-{:02}-{:02} {:02}:{:02}:{:02} vl={}",
+                dt.year,
+                dt.month,
+                dt.day,
+                dt.hour,
+                dt.minute,
+                dt.second,
+                dt.voltage_low
+            );
+            if dt.voltage_low {
+                log::warn!("PCF8563 VL set (RTC battery low/lost); reseeding from build time");
+                let seeded = DateTime::from_unix(BUILD_EPOCH_SECS);
+                if let Err(err) = board.rtc.write_time(&seeded) {
+                    log::warn!("PCF8563 reseed failed: {err}");
+                } else {
+                    dt = seeded;
+                }
+            }
+            Some(dt)
+        }
+        Err(err) => {
+            log::warn!("PCF8563 read_time failed: {err}");
+            None
+        }
+    };
+
+    board.display.render_with_time(&counts, clock.as_ref());
     board.display.refresh_full()?;
     log::info!("Initial display refresh completed");
 
@@ -125,11 +178,11 @@ fn main() -> Result<()> {
         }
 
         if full_refresh {
-            board.display.render(&counts);
+            board.display.render_with_time(&counts, clock.as_ref());
             board.display.refresh_full()?;
             log::info!("Full display refresh completed");
         } else if !dirty.is_empty() {
-            board.display.render(&counts);
+            board.display.render_with_time(&counts, clock.as_ref());
             for rect in &dirty {
                 board.display.refresh_partial(*rect)?;
             }
