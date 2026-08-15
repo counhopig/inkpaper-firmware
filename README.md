@@ -18,10 +18,14 @@
 - 按键计数在 NVS 命名空间 `inkpaper` 中以 `u32` 持久化（`storage.rs`），启动时 `load()`、按键静默 1 s 后 `save()`，重启后保留。
 - 串口每 1 s 打印一次 `Power state: charging=… charge_done=… vbat_mV=…`；电池电压走 ESP-IDF 5.x oneshot ADC（`AdcDriver::new(adc1)` + `GPIO4` = ADC1 CH3），单位是经 1:2 分压校正后的 mV。
 - PCF8563 RTC 挂在 I2C0（`GPIO47`/`GPIO48`，AVDD `GPIO42` 上电拉高），启动时 `read_time()`，若 `voltage_low` 置位则用 `build.rs` 记录的构建 epoch 写入芯片并显示；时间显示在屏幕左上角（`YYYY-MM-DD HH:MM:SS`，RTC 状态文本）。
+- GPIO17 RTC hold 深度睡眠：长按 DOWN 3 s 进入深睡，ENTER（GPIO0 低电平）唤醒；唤醒后 RTC 若健康则**跳过** Wi-Fi/NTP 重连，直接进入按键循环（见 `docs/wifi-connect-issue.md` 之外的 perf 提交）。
+- Wi-Fi STA 连接（`src/wifi.rs`，esp-idf-svc `EspWifi`）+ SNTP 时间同步，结果写回 PCF8563；仅在首次开机 / 上电复位 / RTC `voltage_low` 时才连网，避免每次深睡唤醒都联网。
+- **设备端 Wi-Fi 配网向导**（`src/provision.rs`）：主界面长按 UP 3 s 进入，扫描并从列表中选 AP（不用手打 SSID，从根源上避免大小写打错导致连不上——参见 `docs/wifi-connect-issue.md`），UP/DOWN 转字符轮盘输入密码，提交前先实际 `connect()` 验证成功才写入 NVS。仍保留 `scripts/gen-nvs-wifi.py` 作为脚本化供网的备选。
+- 统一的画布/字体层：`src/canvas.rs`（1bpp 帧缓冲 + 像素/矩形/文字绘制原语，独立于 EPD 驱动）+ `src/font.rs`（5×7 位图字模）；`display.rs` 只负责 EPD 句柄与屏幕布局。
 ### 尚未完成
 > 备注：以下功能当前**尚未**移植到本仓库：
 
-Wi-Fi 配网、ES8311 音频、PCF8563 RTC、GT23SC6699 NFC、电池 ADC 与充电管理、文件系统、休眠和 OTA；内容协议未定（自研 HTTP / Slate 兼容 / 完全离线）。
+ES8311 音频、GT23SC6699 NFC、文件系统、OTA；内容协议未定（自研 HTTP / Slate 兼容 / 完全离线）。
 
 完整的环境、安全事项、构建、烧录、调试与故障排查见 **[docs/development-guide.md](docs/development-guide.md)**。
 
@@ -31,7 +35,8 @@ Wi-Fi 配网、ES8311 音频、PCF8563 RTC、GT23SC6699 NFC、电池 ADC 与充�
 inkpaper/
 ├── docs/
 │   ├── development-guide.md  完整开发指南（必读）
-│   └── note4-hardware.md     板级 GPIO / 电源轨 / EPD 格式
+│   ├── note4-hardware.md     板级 GPIO / 电源轨 / EPD 格式
+│   └── wifi-connect-issue.md Wi-Fi STA 连接排查记录（已解决：SSID 大小写不匹配）
 ├── rust-firmware/
 │   ├── .cargo/config.toml           构建目标 / IDF 路径 / libclang
 │   ├── Cargo.toml                   依赖 + extra_components (EPD FFI)
@@ -41,11 +46,17 @@ inkpaper/
 │   ├── rust-toolchain.toml          channel = "esp"
 │   ├── sdkconfig.defaults           DIO / 80 MHz / OCT PSRAM / USB Serial/JTAG
 │   ├── src/
-│   │   ├── main.rs                  入口 + 按键事件 + 局刷/全刷循环
+│   │   ├── main.rs                  入口 + 按键事件 + 局刷/全刷循环 + Wi-Fi/深睡编排
 │   │   ├── board.rs                 电源锁存 / LED / 按键 / 充电 GPIO / oneshot ADC
 │   │   ├── button.rs                消抖 + 短按/1s 长按
-│   │   ├── display.rs               1bpp 画布 + EPD Rust 封装 + 5x7 字模
-│   │   └── storage.rs               NVS 持久化按键计数
+│   │   ├── canvas.rs                1bpp 帧缓冲 + 像素/矩形/文字绘制原语
+│   │   ├── font.rs                  5x7 位图字模
+│   │   ├── display.rs               EPD Rust 封装 + 屏幕布局（依赖 canvas/font）
+│   │   ├── power.rs                 深度睡眠 / GPIO17 RTC hold / 唤醒原因
+│   │   ├── provision.rs             设备端 Wi-Fi 配网向导（长按 UP 3s 进入）
+│   │   ├── rtc.rs                   PCF8563 驱动
+│   │   ├── storage.rs               NVS 持久化按键计数 + Wi-Fi 凭据
+│   │   └── wifi.rs                  Wi-Fi STA 连接 + 扫描 + NTP 同步
 │   └── components/zectrix_epd/
 │       ├── CMakeLists.txt
 │       ├── zectrix_epd.cc
@@ -54,7 +65,8 @@ inkpaper/
 ├── scripts/
 │   ├── build-rust.sh                激活 ESP-IDF 5.5.5 并构建（Linux）
 │   ├── build-rust.ps1               激活 ESP-IDF 5.5.5 并构建（Windows，遗留）
-│   └── backup-flash.ps1             完整 16 MiB Flash 备份（Windows，遗留）
+│   ├── backup-flash.ps1             完整 16 MiB Flash 备份（Windows，遗留）
+│   └── gen-nvs-wifi.py              脚本化 Wi-Fi 供网（设备端向导的备选）
 ├── vendor/
 │   ├── README.md                    esp-idf-hal 0.46.2 patch 说明
 │   └── esp-idf-hal/                 本地 patch 仓库（含 sdmmc 字段）
@@ -111,7 +123,7 @@ espflash flash \
 espflash monitor --port /dev/ttyACM0
 ```
 
-成功标志：电源保持按通、LED 闪烁、串口日志输出按键事件、EPD 完成全刷后显示 `Hello world` + 三个按键计数。
+成功标志：电源保持按通、LED 闪烁、串口日志输出按键事件、EPD 完成全刷后显示 `Hello world` + 三个按键计数。若 NVS 里已有 Wi-Fi 凭据（脚本供网或设备端向导写入的），日志还会显示连上 AP、NTP 同步、屏幕左上角时钟更新；首次开机长按 UP 3 s 可进入配网向导。
 
 ### 故障信号
 
@@ -132,10 +144,10 @@ espflash monitor --port /dev/ttyACM0
 
 ## 开发路线（参考 `docs/development-guide.md#12`）
 
-1. 保留当前示例作为硬件冒烟基线。
-2. 加入统一画布、字体与布局层（当前 `display.rs` 是 5×7 像素字模硬编码 + 逐像素绘图）。
-3. NVS 设置、Wi-Fi 配网、时间同步。
-4. 电池 ADC、充电状态、PCF8563 RTC 与低功耗策略（注意 GPIO17 在深睡时需要 RTC GPIO hold）。
+1. ~~保留当前示例作为硬件冒烟基线。~~ 完成。
+2. ~~加入统一画布、字体与布局层。~~ 完成（`canvas.rs` + `font.rs`；`display.rs` 只剩 EPD 句柄与布局）。
+3. ~~NVS 设置、Wi-Fi 配网、时间同步。~~ 完成（`wifi.rs` + `provision.rs` 设备端向导 + SNTP）。
+4. ~~电池 ADC、充电状态、PCF8563 RTC 与低功耗策略。~~ 完成（深睡时 RTC GPIO17 hold；深睡唤醒且 RTC 健康时跳过 Wi-Fi/NTP 重连）。
 5. 音频（I2S + ES8311）、NFC（GT23SC6699）。
 6. 内容协议、内容缓存、文件系统。
 7. OTA、回滚、看门狗与故障恢复。
