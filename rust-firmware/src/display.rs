@@ -1,13 +1,22 @@
 use anyhow::{bail, Result};
 use esp_idf_svc::sys::zectrix_epd::{
     zectrix_epd_config_t, zectrix_epd_del, zectrix_epd_get_default_config, zectrix_epd_handle_t,
-    zectrix_epd_new, zectrix_epd_power_off, zectrix_epd_power_on, zectrix_epd_refresh_full_1bpp,
+    zectrix_epd_new, zectrix_epd_power_off, zectrix_epd_power_on, zectrix_epd_rect_t,
+    zectrix_epd_refresh_full_1bpp, zectrix_epd_refresh_partial_1bpp,
 };
 
 pub const WIDTH: usize = 400;
 pub const HEIGHT: usize = 300;
 const BYTES_PER_ROW: usize = WIDTH / 8;
 const FRAME_SIZE: usize = BYTES_PER_ROW * HEIGHT;
+
+#[derive(Clone, Copy, Debug)]
+pub struct Rect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
 
 pub struct ButtonCounts {
     pub enter: u32,
@@ -57,6 +66,48 @@ impl EpdDisplay {
             zectrix_epd_power_off(self.handle)
         });
         refresh.and(power_off)
+    }
+
+    pub fn refresh_partial(&mut self, rect: Rect) -> Result<()> {
+        check_epd("power on EPD", unsafe { zectrix_epd_power_on(self.handle) })?;
+        let pixels = self.pack_rect(rect);
+        let c_rect = zectrix_epd_rect_t {
+            x: rect.x as i32,
+            y: rect.y as i32,
+            width: rect.width as i32,
+            height: rect.height as i32,
+        };
+        let refresh = check_epd("refresh EPD partial", unsafe {
+            zectrix_epd_refresh_partial_1bpp(
+                self.handle,
+                &c_rect,
+                pixels.as_ptr(),
+                pixels.len(),
+            )
+        });
+        let power_off = check_epd("power off EPD", unsafe {
+            zectrix_epd_power_off(self.handle)
+        });
+        refresh.and(power_off)
+    }
+
+    fn pixel_is_white(&self, x: usize, y: usize) -> bool {
+        let index = y * BYTES_PER_ROW + x / 8;
+        let mask = 1 << (7 - (x & 7));
+        self.frame[index] & mask != 0
+    }
+
+    fn pack_rect(&self, rect: Rect) -> Vec<u8> {
+        let row_bytes = (rect.width as usize + 7) / 8;
+        let mut packed = vec![0u8; row_bytes * rect.height as usize];
+        for (row, y) in (rect.y..rect.y + rect.height).enumerate() {
+            for (column, x) in (rect.x..rect.x + rect.width).enumerate() {
+                if self.pixel_is_white(x as usize, y as usize) {
+                    packed[row * row_bytes + column / 8] |= 1 << (7 - (column & 7));
+                }
+            }
+        }
+        packed
     }
 
     fn clear(&mut self) {
