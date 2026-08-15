@@ -1,6 +1,8 @@
 mod board;
 mod button;
+mod canvas;
 mod display;
+mod font;
 mod power;
 mod rtc;
 mod storage;
@@ -12,7 +14,8 @@ use std::time::Duration;
 use anyhow::Result;
 use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
-use display::{ButtonCounts, Rect};
+use canvas::Rect;
+use display::ButtonCounts;
 use rtc::DateTime;
 use storage::PersistedCounters;
 
