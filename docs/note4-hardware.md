@@ -1,7 +1,7 @@
 # NOTE4 Hardware Notes
 
 这些硬件信息来自 ZECTRIX NOTE4 规格页和 Slate 固件文档的交叉整理，作为本项目的板级基线。
-
+> **注意：** GPIO 表描述的是 **NOTE4 整机硬件**，包含所有模块的引脚。当前 Rust 示例（见 [`../README.md`](../README.md) 与 [`development-guide.md`](development-guide.md)）仅显式使用了 GPIO 0/3/6/8/9/10/11/12/13/17/18/39/42，其余信号保留供后续模块接入。
 ## Core
 
 | Item | Value |

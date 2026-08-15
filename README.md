@@ -1,78 +1,134 @@
 # Inkpaper NOTE4 Firmware
 
-这是一个面向 **ZECTRIX NOTE4 黑白屏** 的自研固件起点。
+自研固件起点，目标硬件：**ZECTRIX NOTE4 黑白屏版**（ESP32-S3-WROOM-1 N16R8，4.2 寸 400×300 SSD2683 EPD）。
 
-目标硬件是 NOTE4 / ZecTrix Note4 V1.0：ESP32-S3 N16R8、4.2 英寸 400x300 黑白 EPD、ES8311 音频、MEMS 麦、NFC、三颗按键、锂电池和 Type-C。
-
-> 注意：本项目只面向 NOTE4 黑白屏，不适用于 NOTE4C 四色屏。NOTE4 和 NOTE4C 的屏幕驱动与固件不可混刷。
+> 本仓库**只面向 NOTE4 黑白屏**。NOTE4 与 NOTE4C 的屏幕硬件和固件不同，**不可混刷**。
 
 ## 当前状态
 
-当前提供 Rust 主固件。Rust 固件已在实机验证：
+`rust-firmware/` 是当前可在实机运行的 Rust 主固件：
 
-- GPIO17 主电源软锁存保持，避免松开电源键后断电。
-- GPIO3 绿色 LED 心跳，确认 app 正常运行。
-- GPIO0 / GPIO39 / GPIO18 三个按键读取。
-- 官方 SSD2683 驱动和完整波形已接入，可执行 400x300 黑白全刷。
-- 启动显示 `Hello world`，按键后更新 ENTER / UP / DOWN 计数。
-- 16 MB Flash + 约 12 MB 预留存储分区已预置。
+- GPIO17 主电源软锁存，启动后立即拉高，按下电源键后不会断电。
+- GPIO3 绿色 LED 心跳（~0.5 s 翻转）。
+- GPIO0/39/18 三按键（ENTER/UP/DOWN），20 ms 采样、4 次确认消抖，支持短按和 1 s 长按事件。
+- 官方 ZECTRIX EPD 组件（C++）通过 `package.metadata.esp-idf-sys.extra_components` 接入，FFI 模块 `zectrix_epd` 已生成。
+- 启动后全刷显示 `Hello world` + 三个按键计数；按键短按触发**官方局刷 API** 仅刷新数字区域；长按任意键触发一次全刷清残影。
+- 16 MB Flash + ~12 MB 预留存储分区已固化在 `rust-firmware/partitions.csv`。
+- 完整的 16 MiB 原厂 Flash 已备份（`backups/note4-factory-20260815-213553.bin`，SHA-256 `dbe8b1…d182a`）。
 
-完整的环境、备份、构建、烧录、恢复、架构与排错说明见：
+### 尚未完成
 
-**[NOTE4 固件开发指南](docs/development-guide.md)**
+Wi-Fi 配网、ES8311 音频、RTC（PCF8563）、NFC（GT23SC6699）、电池 ADC 与充电管理、文件系统、休眠和 OTA；内容协议未定（自研 HTTP / Slate 兼容 / 完全离线）。
 
-## 目录
+完整的环境、安全事项、构建、烧录、调试与故障排查见 **[docs/development-guide.md](docs/development-guide.md)**。
 
-```text
-.
+## 仓库结构
+
+```
+inkpaper/
 ├── docs/
-│   ├── bringup-checklist.md
-│   ├── development-guide.md
-│   └── note4-hardware.md
+│   ├── development-guide.md  完整开发指南（必读）
+│   └── note4-hardware.md     板级 GPIO / 电源轨 / EPD 格式
 ├── rust-firmware/
-│   ├── .cargo/config.toml
-│   ├── Cargo.toml
-│   ├── partitions.csv
-│   ├── sdkconfig.defaults
-│   └── src/
-└── scripts/
-    ├── backup-flash.ps1
-    └── build-rust.ps1
+│   ├── .cargo/config.toml           输出固定到 D:\espbuild
+│   ├── Cargo.toml                   依赖 + extra_components (EPD FFI)
+│   ├── Cargo.lock
+│   ├── build.rs                     embuild::espidf::sysenv::output
+│   ├── partitions.csv               nvs / phy_init / factory / storage
+│   ├── rust-toolchain.toml          channel = "esp"
+│   ├── sdkconfig.defaults           DIO / 80 MHz / OCT PSRAM / USB Serial/JTAG
+│   ├── src/
+│   │   ├── main.rs                  入口 + 按键事件 + 局刷/全刷循环
+│   │   ├── board.rs                 电源锁存 / LED / 按键 / 充电 GPIO
+│   │   ├── button.rs                消抖 + 短按/1s 长按
+│   │   └── display.rs               1bpp 画布 + EPD Rust 封装 + 5x7 字模
+│   └── components/zectrix_epd/
+│       ├── CMakeLists.txt
+│       ├── zectrix_epd.cc
+│       ├── include/zectrix_epd.h
+│       └── private_include/ssd2683_waveform.h
+├── scripts/
+│   ├── build-rust.ps1               激活 ESP-IDF 5.5.5 并构建
+│   └── backup-flash.ps1             完整 16 MiB Flash 备份
+├── vendor/
+│   ├── README.md                    esp-idf-hal 0.46.2 patch 说明
+│   └── esp-idf-hal/                 本地 patch 仓库（含 sdmmc 字段）
+└── backups/
+    └── note4-factory-20260815-213553.bin     (gitignored)
 ```
 
 ## 开发环境
 
-推荐使用 ESP-IDF 5.5.x。Rust 固件使用已安装的 `esp` Xtensa 工具链。进入 ESP-IDF PowerShell 后：
+已验证组合：
 
-```powershell
-cd rust-firmware
-cargo build
-```
+| 组件 | 版本 / 路径 |
+| --- | --- |
+| 操作系统 | Windows 11 x86-64 |
+| ESP-IDF | 5.5.5（默认 `C:\Espressif\frameworks\esp-idf-v5.5.5-2`）|
+| Python | 3.11（由 ESP-IDF 管理） |
+| Rust 工具链 | 频道 `esp`（Espressif Xtensa，rust-toolchain.toml） |
+| Xtensa GCC | `xtensa-esp-elf` 14.2.0（含 `xtensa-esp32s3-elf-nm/readelf/objdump`） |
+| 烧录工具 | `cargo-espflash`（在 `~/.cargo/bin`） |
+| 构建工具 | Visual Studio C++ Build Tools + Windows 11 SDK |
 
-Windows 上 `esp-idf-sys` 对构建路径长度有限制，因此 Rust 编译产物固定放在 `D:\espbuild`。
-也可以从普通 PowerShell 运行 `scripts\build-rust.ps1`，脚本会自动激活本机 ESP-IDF 5.5.5 环境。
+如系统上的 ESP-IDF 路径或版本不同，需要同步修改 `scripts/build-rust.ps1` 和 `rust-firmware/.cargo/config.toml`。
 
-确认已经备份原厂 Flash 后，构建 release 固件：
+## 快速开始
 
-```powershell
-.\scripts\build-rust.ps1 -Release
-```
-
-如果是第一次刷自己的固件，请先完整备份 16 MiB 原厂 Flash：
+第一次刷自己的固件前，先完整备份原厂 16 MiB Flash：
 
 ```powershell
 .\scripts\backup-flash.ps1 -Port COMx
+Get-FileHash .\backups\*.bin -Algorithm SHA256
 ```
 
-## 开发路线
+构建并烧录：
 
-建议按这个顺序推进：
+```powershell
+# 构建 release 镜像
+.\scripts\build-rust.ps1 -Release
 
-1. 备份原厂 Flash，确认可恢复。
-2. 刷入当前 Rust 固件，确认串口日志、LED、按键和电源保持正常。
-3. 保留官方 EPD 驱动作为全刷基线，再验证局刷和刷新合并。
-4. 建立应用 UI、字体和输入事件层。
-5. 加入 Wi-Fi 配网、NVS 凭据、低功耗 deep sleep。
-6. 决定内容协议：自研极简 HTTP、兼容 Slate，或完全离线应用。
+# 烧录（已映射到生成路径）
+espflash flash `
+  --port COMx `
+  --chip esp32s3 `
+  --flash-size 16mb `
+  --flash-mode dio `
+  --flash-freq 80mhz `
+  --partition-table .\rust-firmware\partitions.csv `
+  D:\espbuild\xtensa-esp32s3-espidf\release\inkpaper-note4
 
-Slate 是一个很好的参考项目，但这个仓库会保持为你自己的 NOTE4 固件起点。
+# 查看日志
+espflash monitor --port COMx
+```
+
+成功标志：电源保持按通、LED 闪烁、串口日志输出按键事件、EPD 完成全刷后显示 `Hello world` + 三个按键计数。
+
+### 故障信号
+
+- **烧录成功但反复复位** → 确认 `sdkconfig.defaults` 仍为 `CONFIG_ESPTOOLPY_FLASHMODE_DIO=y`（NOTE4 实机不支持 QIO）。
+- **日志说刷新完成但屏幕完全不动** → 确认有编译进静态库的 `libzectrix_epd.a`；`vendor/esp-idf-hal/` 切到正确版本后重跑 `cargo clean -p esp-idf-sys`。
+- **上电后立刻关机** → 确认 `GPIO17` 在启动早期被拉高（GPIO 锁存）。
+- **无法识别 `espflash`/`esptool.py`** → ESP-IDF 环境未激活。先在 PowerShell 中 `. "C:\Espressif\frameworks\esp-idf-v5.5.5-2\export.ps1"`。
+
+## 版本
+
+| 组件 | 版本 |
+| --- | --- |
+| `inkpaper-note4` (crate) | `0.1.0` |
+| `esp-idf-sys` | 0.37.2 |
+| `esp-idf-svc` | 0.52.1 |
+| `esp-idf-hal` | 0.46.2（vendor + sdmmc patch）|
+| `embuild` (build) | 0.33.3 |
+
+## 开发路线（参考 `docs/development-guide.md#12`）
+
+1. 保留当前示例作为硬件冒烟基线。
+2. 加入统一画布、字体与布局层（当前 `display.rs` 是 5×7 像素字模硬编码 + 逐像素绘图）。
+3. NVS 设置、Wi-Fi 配网、时间同步。
+4. 电池 ADC、充电状态、PCF8563 RTC 与低功耗策略（注意 GPIO17 在深睡时需要 RTC GPIO hold）。
+5. 音频（I2S + ES8311）、NFC（GT23SC6699）。
+6. 内容协议、内容缓存、文件系统。
+7. OTA、回滚、看门狗与故障恢复。
+
+Slate 是一个参考实现，但本仓库会保持为你自己的 NOTE4 固件起点。
