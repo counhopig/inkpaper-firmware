@@ -11,6 +11,7 @@ use heapless::String as HeaplessString;
 
 use crate::rtc::{DateTime, Pcf8563};
 use crate::storage::WifiCreds;
+use crate::watchdog;
 
 /// How long to wait for the STA link to come up before giving up.
 const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -73,6 +74,7 @@ impl WifiSta {
             }
             Err(err) => log::warn!("manual scan failed: {err:?}"),
         }
+        watchdog::feed();
 
         wifi.connect()
             .map_err(|e| anyhow!("esp_wifi_connect failed: {e:?}"))?;
@@ -81,6 +83,7 @@ impl WifiSta {
         // see no `wifi:state` logs below `CONNECT` time and this times out.
         let deadline = (EspSystemTime {}).now() + WIFI_CONNECT_TIMEOUT;
         loop {
+            watchdog::feed();
             if let Ok(true) = wifi.is_connected() {
                 log::info!("Wi-Fi connected to '{}'", creds.ssid);
                 break;
@@ -96,6 +99,7 @@ impl WifiSta {
 
         let netif_deadline = (EspSystemTime {}).now() + Duration::from_secs(10);
         loop {
+            watchdog::feed();
             if let Ok(true) = wifi.sta_netif().is_up() {
                 log::info!("Wi-Fi netif is up (DHCP done)");
                 break;
@@ -124,6 +128,7 @@ pub fn scan_networks(sysloop: &EspSystemEventLoop) -> Result<Vec<AccessPointInfo
         .context("failed to set STA mode for scan")?;
     wifi.start().context("failed to start Wi-Fi for scan")?;
     let mut aps = wifi.scan().context("Wi-Fi scan failed")?;
+    watchdog::feed();
     let _ = wifi.stop();
     aps.sort_by_key(|ap| std::cmp::Reverse(ap.signal_strength));
     aps.dedup_by(|a, b| a.ssid == b.ssid);
@@ -141,6 +146,7 @@ pub fn ntp_sync_and_set_rtc(rtc: &mut Pcf8563) -> Result<()> {
 
     let deadline = EspSystemTime {}.now() + NTP_SYNC_TIMEOUT;
     loop {
+        watchdog::feed();
         if sntp.get_sync_status() == SyncStatus::Completed {
             break;
         }

@@ -27,3 +27,10 @@ CONFIG_ADC_ONESHOT_ENABLED=y
 CONFIG_I2C=y
 CONFIG_I2C_ENABLE_DEBUG_LOG=n
 CONFIG_LWIP_SNTP_MAX_SERVERS=2
+
+# Task watchdog: catch a genuine hang (stuck peripheral, a future infinite
+# loop) and reboot instead of leaving the device stuck. 10s gives headroom
+# over the longest observed single blocking call (Wi-Fi scan, ~2.5s) while
+# still catching anything that's actually stuck. See src/watchdog.rs.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_TASK_WDT_PANIC=y

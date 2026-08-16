@@ -16,6 +16,7 @@ use crate::board::Note4Board;
 use crate::button::{ButtonEvent, POLL_INTERVAL_MS};
 use crate::canvas::Canvas;
 use crate::storage::{PersistedCounters, WifiCreds};
+use crate::watchdog;
 use crate::wifi;
 
 /// Poll cycles (x20ms) UP must be held from the main screen to enter setup.
@@ -93,6 +94,7 @@ fn poll_nav(board: &mut Note4Board) -> Nav {
 }
 
 fn tick() {
+    watchdog::feed();
     thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
 }
 

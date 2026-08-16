@@ -9,6 +9,7 @@ mod power;
 mod provision;
 mod rtc;
 mod storage;
+mod watchdog;
 mod wifi;
 
 use std::thread;
@@ -78,6 +79,9 @@ fn main() -> Result<()> {
     esp_idf_svc::log::EspLogger::initialize_default();
 
     log::info!("Inkpaper NOTE4 Rust bring-up starting");
+    if let Err(err) = watchdog::subscribe() {
+        log::warn!("Task watchdog subscribe failed: {err}");
+    }
     let woke_from_deep_sleep = power::log_wakeup_cause();
     let mut board = Note4Board::take()?;
     log::info!("Power latch is high; rendering Hello world");
@@ -252,6 +256,8 @@ fn main() -> Result<()> {
     let mut down_held_polls: u32 = 0;
     let mut up_held_polls: u32 = 0;
     loop {
+        watchdog::feed();
+
         led_tick += 1;
         if led_tick >= 12 {
             led_tick = 0;
