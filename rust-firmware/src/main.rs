@@ -4,6 +4,7 @@ mod button;
 mod canvas;
 mod display;
 mod font;
+mod nfc;
 mod power;
 mod provision;
 mod rtc;
@@ -165,6 +166,27 @@ fn main() -> Result<()> {
             }
         }
         None => log::warn!("ES8311 not available; skipping bring-up tone"),
+    }
+
+    // TEMPORARY hardware bring-up check for the GT23SC6699 NFC tag: read the
+    // UID block and log the field-detect pin once at boot. Move this behind
+    // a real trigger (or drop it) once confirmed working.
+    match board.nfc.as_mut() {
+        Some(tag) => match tag.read_uid() {
+            Ok(uid) => log::info!(
+                "NFC UID: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X} field_present={}",
+                uid[0],
+                uid[1],
+                uid[2],
+                uid[3],
+                uid[4],
+                uid[5],
+                uid[6],
+                tag.field_present()
+            ),
+            Err(err) => log::warn!("NFC UID read failed: {err}"),
+        },
+        None => log::warn!("NFC not available; skipping bring-up check"),
     }
 
     report_power_state(&mut board)?;

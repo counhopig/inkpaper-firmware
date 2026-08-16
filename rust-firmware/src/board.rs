@@ -13,13 +13,15 @@ use esp_idf_svc::hal::units::Hertz;
 use crate::audio::{self, Es8311};
 use crate::button::Button;
 use crate::display::EpdDisplay;
+use crate::nfc::{self, NfcTag};
 use crate::power;
 use crate::rtc::{Pcf8563, PCF8563_ADDR};
 pub type BoardAdc = AdcDriver<'static, esp_idf_svc::hal::adc::ADCU1>;
 
-/// I2C0 is shared between the PCF8563 RTC and the ES8311 audio codec, so
-/// both hold a clone of the same driver instance rather than each owning
-/// their own (only one `I2cDriver` may be installed per port).
+/// I2C0 is shared between the PCF8563 RTC, the ES8311 audio codec, and the
+/// GT23SC6699 NFC tag, so all three hold a clone of the same driver
+/// instance rather than each owning their own (only one `I2cDriver` may be
+/// installed per port).
 pub type SharedI2c = Rc<RefCell<I2cDriver<'static>>>;
 
 const BATTERY_ADC_CHANNEL_CONFIG: AdcChannelConfig = AdcChannelConfig {
@@ -44,6 +46,8 @@ pub struct Note4Board {
     /// `None` when the ES8311 failed to initialize; the rest of the board
     /// (display/buttons/RTC/Wi-Fi) still works without it.
     pub audio: Option<Es8311>,
+    /// `None` when the GT23SC6699 failed to initialize; see `audio` above.
+    pub nfc: Option<NfcTag>,
 }
 
 impl Note4Board {
@@ -122,6 +126,19 @@ impl Note4Board {
             }
         };
 
+        // GT23SC6699 NFC tag: power on GPIO21, field-detect on GPIO7,
+        // control over the same shared I2C0 bus. Soft-fails like `audio`
+        // above.
+        let nfc_power = PinDriver::output(pins.gpio21)?;
+        let nfc_fd = PinDriver::input(pins.gpio7, Pull::Up)?;
+        let nfc = match NfcTag::new(i2c_bus.clone(), nfc::GT23SC6699_ADDR, nfc_power, nfc_fd) {
+            Ok(tag) => Some(tag),
+            Err(err) => {
+                log::warn!("NFC init failed: {err}");
+                None
+            }
+        };
+
         Ok(Self {
             _power_latch: power_latch,
             led,
@@ -135,6 +152,7 @@ impl Note4Board {
             display,
             rtc,
             audio,
+            nfc,
         })
     }
 
