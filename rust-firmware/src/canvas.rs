@@ -1,6 +1,7 @@
 //! 1bpp frame buffer and drawing primitives, independent of the EPD driver.
 
 use crate::font;
+use crate::font8x16;
 
 pub const WIDTH: usize = 400;
 pub const HEIGHT: usize = 300;
@@ -77,6 +78,19 @@ impl Canvas {
     }
 
     pub fn draw_text(&mut self, x: usize, y: usize, scale: usize, text: &str) {
+        self.draw_text_ink(x, y, scale, text, true);
+    }
+
+    /// Draws text with white ink instead of black - e.g. a label sitting on
+    /// top of a filled-black highlight bar (see [`Canvas::fill_rect`]).
+    /// Not called anywhere yet now that provision.rs uses the proportional
+    /// font's white variant instead - kept for any 5x7 use that comes up.
+    #[allow(dead_code)]
+    pub fn draw_text_white(&mut self, x: usize, y: usize, scale: usize, text: &str) {
+        self.draw_text_ink(x, y, scale, text, false);
+    }
+
+    fn draw_text_ink(&mut self, x: usize, y: usize, scale: usize, text: &str, black: bool) {
         let mut cursor = x;
         for character in text.chars() {
             let glyph = font::glyph(character);
@@ -88,12 +102,65 @@ impl Canvas {
                             y + row * scale,
                             scale,
                             scale,
-                            true,
+                            black,
                         );
                     }
                 }
             }
             cursor += font::ADVANCE * scale;
         }
+    }
+
+    /// Draws text with the proportional-width 8x16 font (`font8x16.rs`) -
+    /// more legible than the fixed 5x7 grid `draw_text` uses, at the cost
+    /// of a bigger glyph. Returns the pixel width drawn, so callers that
+    /// need to right-align or center text don't have to duplicate the
+    /// advance-width math.
+    pub fn draw_text_prop(&mut self, x: usize, y: usize, scale: usize, text: &str) -> usize {
+        self.draw_text_prop_ink(x, y, scale, text, true)
+    }
+
+    /// White-ink version of [`Canvas::draw_text_prop`] - see
+    /// [`Canvas::draw_text_white`] for when you'd want this.
+    pub fn draw_text_prop_white(&mut self, x: usize, y: usize, scale: usize, text: &str) -> usize {
+        self.draw_text_prop_ink(x, y, scale, text, false)
+    }
+
+    /// Pixel width `text` would occupy if drawn with [`Canvas::draw_text_prop`]
+    /// at `scale`, without drawing anything - for right-aligning/centering
+    /// before the content is known to fit.
+    pub fn text_prop_width(text: &str, scale: usize) -> usize {
+        text.chars()
+            .map(|c| (font8x16::glyph(c).1 as usize + 1) * scale)
+            .sum()
+    }
+
+    fn draw_text_prop_ink(
+        &mut self,
+        x: usize,
+        y: usize,
+        scale: usize,
+        text: &str,
+        black: bool,
+    ) -> usize {
+        let mut cursor = x;
+        for character in text.chars() {
+            let (rows, width) = font8x16::glyph(character);
+            for (row, bits) in rows.iter().enumerate() {
+                for column in 0..width as usize {
+                    if bits & (1 << (15 - column)) != 0 {
+                        self.fill_rect(
+                            cursor + column * scale,
+                            y + row * scale,
+                            scale,
+                            scale,
+                            black,
+                        );
+                    }
+                }
+            }
+            cursor += (width as usize + 1) * scale;
+        }
+        cursor - x
     }
 }

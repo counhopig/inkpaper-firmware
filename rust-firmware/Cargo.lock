@@ -460,9 +460,11 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "enumset",
  "heapless 0.9.3",
+ "log",
  "num_enum",
  "serde",
  "strum 0.27.2",
+ "strum_macros 0.27.2",
 ]
 
 [[package]]
@@ -497,6 +499,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc5801fd11762e24d1e420d01d2ac518f2a2ca4329d4fbb6639f2412b6204e0"
 dependencies = [
  "enumset_derive",
+ "serde",
 ]
 
 [[package]]
@@ -595,6 +598,28 @@ dependencies = [
  "serde",
  "strum 0.24.1",
  "which",
+]
+
+[[package]]
+name = "esp32-nimble"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aabfc9f595c551d3270ab2a5feca5f5b961863bcc40bb5549a8f9b4154fd8997"
+dependencies = [
+ "anyhow",
+ "bitflags 2.13.1",
+ "bstr",
+ "cfg-if",
+ "embassy-sync",
+ "embuild",
+ "esp-idf-svc",
+ "heapless 0.8.0",
+ "log",
+ "num_enum",
+ "once_cell",
+ "uuid",
+ "zerocopy",
+ "zerocopy-derive",
 ]
 
 [[package]]
@@ -748,6 +773,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
 dependencies = [
  "hash32",
+ "serde_core",
  "stable_deref_trait",
 ]
 
@@ -833,10 +859,14 @@ name = "inkpaper-note4"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "embedded-svc",
  "embuild",
  "esp-idf-svc",
+ "esp32-nimble",
  "heapless 0.9.3",
  "log",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1406,6 +1436,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "uuid"
+version = "1.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2cefc03fd367c0c6d4305de1b312cf00248c4114f4a0418ce6a6af769e3b0bd9"
+
+[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1650,6 +1686,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "zerocopy"
+version = "0.8.56"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
+dependencies = [
+ "zerocopy-derive",
+]
+
+[[package]]
+name = "zerocopy-derive"
+version = "0.8.56"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

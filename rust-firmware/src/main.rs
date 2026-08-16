@@ -1,32 +1,38 @@
+mod alarms;
 mod audio;
+mod ble_control;
 mod board;
 mod button;
 mod canvas;
+mod control;
 mod display;
 mod font;
+mod font8x16;
 mod nfc;
 mod power;
 mod provision;
 mod rtc;
+mod screens;
 mod storage;
+mod sync;
+mod todos;
+mod ui;
+mod usb_console;
 mod watchdog;
 mod wifi;
 
 use std::thread;
 use std::time::Duration;
 
+use alarms::AlarmStore;
 use anyhow::Result;
 use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
 use canvas::Rect;
-use display::ButtonCounts;
 use esp_idf_svc::systime::EspSystemTime;
 use rtc::DateTime;
 use storage::PersistedCounters;
-
-/// Save the counters to NVS when at least this many idle polling cycles have
-/// elapsed since the last key event. 50 cycles × 20 ms = 1 s of quiet.
-const COUNTER_SAVE_IDLE_POLLS: u32 = 50;
+use todos::TodoStore;
 
 /// Poll cycles between two consecutive `power status` log lines.
 /// 50 × 20 ms = 1 s.
@@ -86,28 +92,21 @@ fn main() -> Result<()> {
     }
     let woke_from_deep_sleep = power::log_wakeup_cause();
     let mut board = Note4Board::take()?;
-    log::info!("Power latch is high; rendering Hello world");
+    log::info!("Power latch is high; rendering home screen");
 
-    let counters = PersistedCounters::open()?;
-    let mut counts = match counters.load() {
-        Ok(loaded) => {
-            log::info!(
-                "Loaded persisted counters: enter={} up={} down={}",
-                loaded.enter,
-                loaded.up,
-                loaded.down
-            );
-            loaded
-        }
-        Err(err) => {
-            log::warn!("Could not load persisted counters ({err}); starting from zero");
-            ButtonCounts {
-                enter: 0,
-                up: 0,
-                down: 0,
-            }
-        }
-    };
+    // Taken once and cloned into each store: `EspDefaultNvsPartition::take()`
+    // is a true singleton (a global taken-flag, not a ref-counted "take a
+    // new handle" call) and errors with `ESP_ERR_INVALID_STATE` if called
+    // again while an earlier handle is still alive - three independent
+    // `open()`s each calling `take()` themselves made every boot fail here
+    // once `alarms.rs`/`todos.rs` were added, since `counters`'s handle was
+    // still alive when `AlarmStore::open()` tried to take its own.
+    let nvs_partition = esp_idf_svc::nvs::EspDefaultNvsPartition::take()
+        .map_err(|e| anyhow::anyhow!("failed to initialise default NVS partition: {e}"))?;
+    let counters = PersistedCounters::open(nvs_partition.clone())?;
+    let alarm_store = AlarmStore::open(nvs_partition.clone())?;
+    let todo_store = TodoStore::open(nvs_partition)?;
+    let usb_console = usb_console::UsbConsole::start();
 
     // Wi-Fi/NTP resync is only needed when the RTC time cannot be trusted:
     // first boot after flashing, a real power-on reset, or the PCF8563
@@ -145,7 +144,49 @@ fn main() -> Result<()> {
         }
     };
 
-    board.display.render_with_time(&counts, clock.as_ref());
+    // Ring before the normal boot render, if this boot is the RTC alarm
+    // firing: latency to sound matters more than latency to the home
+    // screen. `power::wake_cause()` reads `esp_sleep_get_wakeup_cause`
+    // again (harmless, not a consuming read) rather than threading the
+    // value through from `woke_from_deep_sleep` above, since that bool
+    // collapses ENTER-wake and alarm-wake into the same case.
+    if power::wake_cause() == power::WakeCause::RtcAlarm {
+        log::info!("Woke from RTC alarm; ringing");
+        ring_alarm_until_dismissed(&mut board)?;
+        if let Err(err) = board.rtc.ack_alarm() {
+            log::warn!("PCF8563 ack_alarm failed: {err}");
+        }
+        // A fired one-shot alarm is spent; drop it so it doesn't linger in
+        // the store and confuse `alarms::next_due` on a future boot. Daily
+        // alarms recur on their own and don't need this.
+        if let (Ok(mut list), Some(dt)) = (alarm_store.load(), clock.as_ref()) {
+            let before = list.len();
+            list.retain(|a| !alarms::is_expired_once(a, dt));
+            if list.len() != before {
+                if let Err(err) = alarm_store.save(&list) {
+                    log::warn!("Failed to save alarms after dropping fired one-shot: {err}");
+                }
+            }
+        }
+    }
+
+    // Keep the PCF8563's single hardware alarm slot pointed at whichever
+    // stored alarm is nearest, every boot: after arming/editing an alarm,
+    // after a ring+ack above, or just because nothing armed it yet this
+    // session (the RTC keeps its own alarm config across deep sleep, but a
+    // fresh flash or an edit made while the device was off both need this).
+    if let Some(dt) = clock.as_ref() {
+        match alarm_store.load() {
+            Ok(list) => {
+                if let Err(err) = alarms::program_hardware_alarm(&mut board.rtc, &list, dt) {
+                    log::warn!("Failed to program hardware alarm: {err}");
+                }
+            }
+            Err(err) => log::warn!("Failed to load alarms: {err}"),
+        }
+    }
+
+    render_home_now(&mut board, &alarm_store, &todo_store, clock.as_ref());
     board.display.refresh_full()?;
     log::info!("Initial display refresh completed");
 
@@ -160,7 +201,7 @@ fn main() -> Result<()> {
 
     // Taken once up front (it's a singleton) so both the boot-time Wi-Fi
     // bring-up below and the on-device Wi-Fi setup wizard (triggered from
-    // the main loop by holding UP) can use it.
+    // the main loop by holding UP, or from the menu) can use it.
     let sysloop = esp_idf_svc::eventloop::EspSystemEventLoop::take()?;
 
     // Optional Wi-Fi bring-up: connect with credentials stored in NVS
@@ -181,7 +222,12 @@ fn main() -> Result<()> {
                         Ok(()) => match board.rtc.read_time() {
                             Ok(dt) => {
                                 clock = Some(dt);
-                                board.display.render_with_time(&counts, clock.as_ref());
+                                render_home_now(
+                                    &mut board,
+                                    &alarm_store,
+                                    &todo_store,
+                                    clock.as_ref(),
+                                );
                                 board.display.refresh_partial(CLOCK_RECT)?;
                                 log::info!("Clock region refreshed after NTP sync");
                             }
@@ -212,17 +258,18 @@ fn main() -> Result<()> {
     };
     // Drop the boot-time connection instead of holding the modem for the
     // rest of the program: nothing else here needs Wi-Fi to stay up, and
-    // keeping it claimed would block the setup wizard (holding UP) from
-    // ever constructing its own EspWifi - only one may exist at a time.
+    // keeping it claimed would block the setup wizard (holding UP, or from
+    // the menu) from ever constructing its own EspWifi - only one may exist
+    // at a time.
     drop(wifi_sta);
 
     let mut led_on = false;
     let mut led_tick = 0u32;
     let mut status_tick = 0u32;
     let mut clock_tick = 0u32;
-    let mut idle_since_save = COUNTER_SAVE_IDLE_POLLS; // mark counters as saved on boot
     let mut down_held_since: Option<Duration> = None;
     let mut up_held_since: Option<Duration> = None;
+    let mut ble_control: Option<ble_control::BleControl> = None;
     loop {
         watchdog::feed();
         let now = EspSystemTime {}.now();
@@ -267,13 +314,50 @@ fn main() -> Result<()> {
             }
         }
 
+        // Poll USB console for incoming commands, dispatch them, and send replies.
+        if let Some(cmd) = usb_console.poll_command() {
+            let reply = control::dispatch(
+                cmd,
+                &mut board,
+                &counters,
+                &sysloop,
+                &alarm_store,
+                &todo_store,
+                clock.as_ref(),
+            );
+            usb_console::write_reply(&reply);
+        }
+
+        // Poll BLE for incoming commands (if BLE is active), dispatch them, and send replies.
+        if let Some(ble) = &ble_control {
+            if let Some(cmd) = ble.poll_command() {
+                let reply = control::dispatch(
+                    cmd,
+                    &mut board,
+                    &counters,
+                    &sysloop,
+                    &alarm_store,
+                    &todo_store,
+                    clock.as_ref(),
+                );
+                ble.write_reply(&reply);
+            }
+        }
+
         if let Some(event) = board.key_enter.poll() {
             match event {
                 ButtonEvent::Pressed => {
-                    counts.enter = counts.enter.saturating_add(1);
-                    log::info!("ENTER pressed count={}", counts.enter);
-                    dirty.push(count_rect(255, 108, counts.enter));
-                    idle_since_save = 0;
+                    log::info!("ENTER pressed; opening menu");
+                    screens::open_menu(
+                        &mut board,
+                        &counters,
+                        &sysloop,
+                        &alarm_store,
+                        &todo_store,
+                        clock.as_ref(),
+                        &mut ble_control,
+                    );
+                    full_refresh = true;
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("ENTER long pressed; full refresh to clean ghosting");
@@ -285,10 +369,6 @@ fn main() -> Result<()> {
         if let Some(event) = board.key_up.poll() {
             match event {
                 ButtonEvent::Pressed => {
-                    counts.up = counts.up.saturating_add(1);
-                    log::info!("UP pressed count={}", counts.up);
-                    dirty.push(count_rect(255, 166, counts.up));
-                    idle_since_save = 0;
                     up_held_since = Some(now);
                 }
                 ButtonEvent::LongPressed => {
@@ -317,10 +397,6 @@ fn main() -> Result<()> {
         if let Some(event) = board.key_down.poll() {
             match event {
                 ButtonEvent::Pressed => {
-                    counts.down = counts.down.saturating_add(1);
-                    log::info!("DOWN pressed count={}", counts.down);
-                    dirty.push(count_rect(255, 224, counts.down));
-                    idle_since_save = 0;
                     down_held_since = Some(now);
                 }
                 ButtonEvent::LongPressed => {
@@ -335,41 +411,44 @@ fn main() -> Result<()> {
         if let Some(since) = down_held_since {
             if now.saturating_sub(since) >= DEEP_SLEEP_HOLD {
                 log::info!("DOWN held for 3 s; entering deep sleep");
-                board.display.render_with_time(&counts, clock.as_ref());
+                render_home_now(&mut board, &alarm_store, &todo_store, clock.as_ref());
                 board.display.refresh_full()?;
-                power::enter_deep_sleep_with_button_wake();
+                power::enter_deep_sleep_with_wakeups(None);
             }
         }
 
         if full_refresh {
-            board.display.render_with_time(&counts, clock.as_ref());
+            render_home_now(&mut board, &alarm_store, &todo_store, clock.as_ref());
             board.display.refresh_full()?;
             log::info!("Full display refresh completed");
         } else if !dirty.is_empty() {
-            board.display.render_with_time(&counts, clock.as_ref());
+            render_home_now(&mut board, &alarm_store, &todo_store, clock.as_ref());
             for rect in &dirty {
                 board.display.refresh_partial(*rect)?;
             }
             log::info!("Partial display refresh completed");
         }
 
-        if idle_since_save < COUNTER_SAVE_IDLE_POLLS {
-            idle_since_save += 1;
-            if idle_since_save == COUNTER_SAVE_IDLE_POLLS {
-                match counters.save(&counts) {
-                    Ok(()) => log::info!(
-                        "Saved counters to NVS: enter={} up={} down={}",
-                        counts.enter,
-                        counts.up,
-                        counts.down
-                    ),
-                    Err(err) => log::warn!("Failed to persist counters: {err}"),
-                }
-            }
-        }
-
         thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
     }
+}
+
+/// Renders the idle/background screen with a freshly-loaded next-alarm
+/// label and pending-todo count. Called after every edit made in
+/// `screens::open_menu` (via the caller re-rendering on return) and on
+/// every clock tick, so these two NVS-backed reads happen fairly often;
+/// both stores are tiny JSON blobs, cheap next to the EPD refresh itself.
+fn render_home_now(
+    board: &mut Note4Board,
+    alarm_store: &AlarmStore,
+    todo_store: &TodoStore,
+    clock: Option<&DateTime>,
+) {
+    let next_alarm = clock.and_then(|dt| screens::next_alarm_label(alarm_store, dt));
+    let todo_pending = screens::pending_todo_count(todo_store);
+    board
+        .display
+        .render_home(clock, next_alarm.as_deref(), todo_pending);
 }
 
 fn report_power_state(board: &mut Note4Board) -> Result<()> {
@@ -385,31 +464,47 @@ fn report_power_state(board: &mut Note4Board) -> Result<()> {
             log::warn!("Battery ADC read failed: {err}");
             log::info!(
                 "Power state: charging={} charge_done={} vbat_mV=<n/a>",
-                charging, charge_done
+                charging,
+                charge_done
             );
         }
     }
     Ok(())
 }
 
-fn count_rect(x: u16, y: u16, count: u32) -> Rect {
-    let digits = digit_count(count);
-    Rect {
-        x: x.saturating_sub(6),
-        y: y.saturating_sub(3),
-        width: digits.saturating_mul(18) + 12,
-        height: 27,
-    }
-}
+/// Safety bound so an unattended/stuck-button alarm can't ring forever and
+/// drain the battery; generous for a bedside alarm.
+const MAX_RING_SECS: u64 = 300;
 
-fn digit_count(mut n: u32) -> u16 {
-    if n == 0 {
-        return 1;
+/// Draws the alarm screen, then alternates short tone bursts with polling
+/// ENTER, until dismissed or `MAX_RING_SECS` elapses. Blocks the main loop
+/// for the whole ring, so it feeds the watchdog every iteration.
+fn ring_alarm_until_dismissed(board: &mut Note4Board) -> Result<()> {
+    let canvas = board.display.canvas_mut();
+    canvas.clear();
+    canvas.draw_text_prop(40, 100, 4, "ALARM");
+    canvas.draw_text_prop(40, 160, 1, "ENTER = DISMISS");
+    let _ = board.display.refresh_full();
+
+    let start = EspSystemTime {}.now();
+    loop {
+        watchdog::feed();
+        if let Some(ButtonEvent::Pressed) = board.key_enter.poll() {
+            log::info!("Alarm dismissed");
+            break;
+        }
+        let elapsed = EspSystemTime {}.now().saturating_sub(start);
+        if elapsed >= Duration::from_secs(MAX_RING_SECS) {
+            log::warn!("Alarm ring timed out after {MAX_RING_SECS}s with no dismiss");
+            break;
+        }
+        if let Some(audio) = board.audio.as_mut() {
+            if let Err(err) = audio.play_sine_stereo(880.0, 0.3, 8000) {
+                log::warn!("Alarm tone playback failed: {err}");
+            }
+        } else {
+            thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
+        }
     }
-    let mut digits = 0;
-    while n > 0 {
-        digits += 1;
-        n /= 10;
-    }
-    digits
+    Ok(())
 }

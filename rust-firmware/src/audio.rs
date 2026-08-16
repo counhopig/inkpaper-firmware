@@ -199,10 +199,13 @@ impl Es8311 {
     /// Streams a sine tone straight to the I2S TX channel in small
     /// stack-buffered chunks, so a multi-second tone never needs a single
     /// large heap allocation (see the note on [`Es8311::play_pcm_stereo`]).
-    /// Not called anywhere yet - kept for whatever plays the first real
-    /// notification/alert sound.
-    #[allow(dead_code)]
-    pub fn play_sine_stereo(&mut self, freq_hz: f32, duration_secs: f32, amplitude: i16) -> Result<()> {
+    /// Used as the alarm-ring tone (see `main.rs::ring_alarm_until_dismissed`).
+    pub fn play_sine_stereo(
+        &mut self,
+        freq_hz: f32,
+        duration_secs: f32,
+        amplitude: i16,
+    ) -> Result<()> {
         self.pa_enable.set_high()?;
         thread::sleep(Duration::from_millis(10));
         self.i2s.tx_enable()?;
@@ -218,7 +221,8 @@ impl Es8311 {
             let n = CHUNK_FRAMES.min(total_frames - frame);
             for i in 0..n {
                 let t = (frame + i) as f32 / sample_rate;
-                let s = (amplitude as f32 * (2.0 * std::f32::consts::PI * freq_hz * t).sin()) as i16;
+                let s =
+                    (amplitude as f32 * (2.0 * std::f32::consts::PI * freq_hz * t).sin()) as i16;
                 let bytes = s.to_le_bytes();
                 chunk[i * 4..i * 4 + 2].copy_from_slice(&bytes);
                 chunk[i * 4 + 2..i * 4 + 4].copy_from_slice(&bytes);

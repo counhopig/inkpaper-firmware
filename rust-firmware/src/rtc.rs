@@ -65,7 +65,7 @@ impl DateTime {
     }
 }
 
-fn is_leap(year: i64) -> bool {
+pub(crate) fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
@@ -161,4 +161,55 @@ impl Pcf8563 {
         self.write_regs(0x01, &[ctrl2[0] & !0x08])?;
         Ok(())
     }
+
+    /// Arms the single PCF8563 alarm slot for `alarm` and enables AIE (ctrl2
+    /// bit1) so the open-drain INT pin (GPIO5, `RTC_INT`) is driven low when
+    /// it fires - the signal `power::enter_deep_sleep_with_wakeups` uses as
+    /// an ext1 wake source. Only one alarm can be armed in hardware at a
+    /// time; callers with multiple stored alarms must always program
+    /// whichever one is chronologically nearest (see `alarms::next_due`).
+    pub fn set_alarm(&mut self, alarm: &AlarmRegs) -> Result<()> {
+        let payload = [
+            bin_to_bcd(alarm.minute) & 0x7F,
+            bin_to_bcd(alarm.hour) & 0x3F,
+            alarm.day.map(|d| bin_to_bcd(d) & 0x3F).unwrap_or(0x80),
+            alarm.weekday.map(|w| w & 0x07).unwrap_or(0x80),
+        ];
+        self.write_regs(0x09, &payload)?;
+        let mut ctrl2 = [0u8; 1];
+        self.read_regs(0x01, &mut ctrl2)?;
+        self.write_regs(0x01, &[ctrl2[0] | 0x02])?;
+        Ok(())
+    }
+
+    /// Reads AF (ctrl2 bit3) without touching AIE, so a still-armed daily
+    /// alarm keeps firing on subsequent days. Not called anywhere yet -
+    /// `power::wake_cause()` is the authoritative "did the alarm fire"
+    /// signal for `main.rs`; kept for a future status/debug screen.
+    #[allow(dead_code)]
+    pub fn alarm_flag(&mut self) -> Result<bool> {
+        let mut ctrl2 = [0u8; 1];
+        self.read_regs(0x01, &mut ctrl2)?;
+        Ok(ctrl2[0] & 0x08 != 0)
+    }
+
+    /// Clears AF (ctrl2 bit3) so the open-drain INT line releases; must be
+    /// called after every alarm wake or INT stays asserted low forever.
+    pub fn ack_alarm(&mut self) -> Result<()> {
+        let mut ctrl2 = [0u8; 1];
+        self.read_regs(0x01, &mut ctrl2)?;
+        self.write_regs(0x01, &[ctrl2[0] & !0x08])?;
+        Ok(())
+    }
+}
+
+/// PCF8563 alarm compare fields. `None` sets that field's AE bit, which
+/// means "ignored in the match" - e.g. `day: None, weekday: None` with
+/// `minute`/`hour` set fires every day at that time; `day: Some(d)` fires
+/// once on that day-of-month instead.
+pub struct AlarmRegs {
+    pub minute: u8,
+    pub hour: u8,
+    pub day: Option<u8>,
+    pub weekday: Option<u8>,
 }

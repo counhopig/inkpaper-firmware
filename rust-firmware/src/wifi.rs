@@ -33,9 +33,11 @@ impl WifiSta {
 
         // Match the reference demo: keep the Wi-Fi config in RAM rather than
         // in NVS so a fresh session starts from the configuration we set here.
-        esp_idf_svc::sys::esp!(unsafe { esp_idf_svc::sys::esp_wifi_set_storage(
-            esp_idf_svc::sys::wifi_storage_t_WIFI_STORAGE_RAM,
-        ) })
+        esp_idf_svc::sys::esp!(unsafe {
+            esp_idf_svc::sys::esp_wifi_set_storage(
+                esp_idf_svc::sys::wifi_storage_t_WIFI_STORAGE_RAM,
+            )
+        })
         .map_err(|e| anyhow!("esp_wifi_set_storage failed: {e:?}"))?;
 
         let ssid: HeaplessString<32> = HeaplessString::try_from(creds.ssid.as_str())
@@ -64,12 +66,7 @@ impl WifiSta {
             Ok(aps) => {
                 log::info!("manual scan: {} APs", aps.len());
                 for ap in aps.iter() {
-                    log::info!(
-                        "  {} ch{} rssi {}",
-                        ap.ssid,
-                        ap.channel,
-                        ap.signal_strength
-                    );
+                    log::info!("  {} ch{} rssi {}", ap.ssid, ap.channel, ap.signal_strength);
                 }
             }
             Err(err) => log::warn!("manual scan failed: {err:?}"),

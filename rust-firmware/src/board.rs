@@ -84,13 +84,8 @@ impl Note4Board {
         // after `Peripherals::take()` in `Note4Board::take`.
 
         let i2c_config = I2cConfig::new().baudrate(I2C_FREQUENCY);
-        let i2c = I2cDriver::new(
-            peripherals.i2c0,
-            pins.gpio47,
-            pins.gpio48,
-            &i2c_config,
-        )
-        .context("failed to install I2C0 driver on GPIO47/48")?;
+        let i2c = I2cDriver::new(peripherals.i2c0, pins.gpio47, pins.gpio48, &i2c_config)
+            .context("failed to install I2C0 driver on GPIO47/48")?;
         let i2c_bus: SharedI2c = Rc::new(RefCell::new(i2c));
         let mut rtc = Pcf8563::new(i2c_bus.clone(), PCF8563_ADDR);
         rtc.probe().context("PCF8563 not responding on I2C bus")?;
@@ -108,10 +103,10 @@ impl Note4Board {
         let audio = match I2sDriver::<I2sTx>::new_std_tx(
             peripherals.i2s0,
             &audio::i2s_std_config(),
-            pins.gpio15,        // BCLK
-            pins.gpio45,        // DOUT
-            Some(pins.gpio14),  // MCLK
-            pins.gpio38,        // WS/LRCK
+            pins.gpio15,       // BCLK
+            pins.gpio45,       // DOUT
+            Some(pins.gpio14), // MCLK
+            pins.gpio38,       // WS/LRCK
         ) {
             Ok(i2s) => match Es8311::new(i2c_bus.clone(), audio::ES8311_ADDR, i2s, pa_enable) {
                 Ok(codec) => Some(codec),

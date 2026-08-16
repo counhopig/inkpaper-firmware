@@ -10,15 +10,18 @@ use crate::rtc::DateTime;
 
 pub use crate::canvas::Rect;
 
-pub struct ButtonCounts {
-    pub enter: u32,
-    pub up: u32,
-    pub down: u32,
-}
+/// Consecutive partial refreshes allowed before `refresh_partial` silently
+/// promotes to a full refresh instead. Matches the policy in the upstream
+/// ZECTRIX demo's `docs/UI_FLOW.md` ("After eight UI partial refreshes, the
+/// next update is promoted to full refresh") - this repo's screens do a lot
+/// more partial-refresh churn (clock ticking every ~1.2s) than the original
+/// counter-demo baseline did, so ghosting control matters more here.
+const PARTIAL_REFRESH_PROMOTE_LIMIT: u32 = 8;
 
 pub struct EpdDisplay {
     handle: zectrix_epd_handle_t,
     canvas: Canvas,
+    partial_refresh_count: u32,
 }
 
 impl EpdDisplay {
@@ -34,37 +37,39 @@ impl EpdDisplay {
         Ok(Self {
             handle,
             canvas: Canvas::new(),
+            partial_refresh_count: 0,
         })
     }
 
-    #[allow(dead_code)]
-    pub fn render(&mut self, counts: &ButtonCounts) {
-        self.render_with_time(counts, None);
-    }
-
     /// Direct canvas access for screens that don't fit the fixed
-    /// `render_with_time` layout, e.g. the Wi-Fi setup wizard.
+    /// `render_home` layout, e.g. the Wi-Fi setup wizard and `screens.rs`.
     pub fn canvas_mut(&mut self) -> &mut Canvas {
         &mut self.canvas
     }
 
-    pub fn render_with_time(&mut self, counts: &ButtonCounts, clock: Option<&DateTime>) {
+    /// The idle/background screen: clock, next-alarm summary, pending-todo
+    /// count. `main.rs` redraws this after returning from any modal screen
+    /// (`screens::open_menu`, the Wi-Fi wizard, an alarm ring).
+    pub fn render_home(
+        &mut self,
+        clock: Option<&DateTime>,
+        next_alarm: Option<&str>,
+        todo_pending: usize,
+    ) {
         self.canvas.clear();
         if let Some(dt) = clock {
             self.draw_clock(dt);
         }
-        self.canvas.draw_text(52, 34, 4, "Hello world");
-        self.canvas.fill_rect(32, 82, 336, 3, true);
-        self.draw_count_row(108, "ENTER", counts.enter);
-        self.draw_count_row(166, "UP", counts.up);
-        self.draw_count_row(224, "DOWN", counts.down);
-    }
-
-    /// Draws one `LABEL ... N` row of the button-count list. Label and value
-    /// share the fixed columns used throughout `render_with_time`.
-    fn draw_count_row(&mut self, y: usize, label: &str, count: u32) {
-        self.canvas.draw_text(36, y, 3, label);
-        self.canvas.draw_text(255, y, 3, &count.to_string());
+        self.canvas.draw_text_prop(20, 60, 3, "INKPAPER");
+        let alarm_line = match next_alarm {
+            Some(label) => format!("NEXT ALARM: {label}"),
+            None => "NEXT ALARM: NONE".to_string(),
+        };
+        self.canvas.draw_text_prop(20, 120, 1, &alarm_line);
+        self.canvas
+            .draw_text_prop(20, 140, 1, &format!("TODOS PENDING: {todo_pending}"));
+        self.canvas
+            .draw_text_prop(20, 280, 1, "ENTER=MENU  HOLD UP=SETUP  HOLD DOWN=SLEEP");
     }
 
     #[allow(dead_code)]
@@ -83,6 +88,7 @@ impl EpdDisplay {
     }
 
     pub fn refresh_full(&mut self) -> Result<()> {
+        self.partial_refresh_count = 0;
         check_epd("power on EPD", unsafe { zectrix_epd_power_on(self.handle) })?;
         let refresh = check_epd("refresh EPD", unsafe {
             zectrix_epd_refresh_full_1bpp(
@@ -97,7 +103,22 @@ impl EpdDisplay {
         refresh.and(power_off)
     }
 
+    /// Silently promotes to a full refresh after
+    /// `PARTIAL_REFRESH_PROMOTE_LIMIT` consecutive partial ones, to bound
+    /// ghosting. Safe to call as often as `refresh_full` itself: every
+    /// caller in this codebase already re-renders the whole canvas (see
+    /// e.g. `main.rs::render_home_now`) before calling either refresh
+    /// method, so promoting mid-call still draws the correct full screen,
+    /// not a stale one. If a single loop iteration ever calls this for
+    /// several rects at once, promotion on an early rect will trigger a
+    /// full refresh per remaining rect too (redundant, not incorrect) -
+    /// not a concern today since no caller passes more than one dirty rect
+    /// per iteration, but worth knowing if that changes.
     pub fn refresh_partial(&mut self, rect: Rect) -> Result<()> {
+        if self.partial_refresh_count >= PARTIAL_REFRESH_PROMOTE_LIMIT {
+            return self.refresh_full();
+        }
+        self.partial_refresh_count += 1;
         check_epd("power on EPD", unsafe { zectrix_epd_power_on(self.handle) })?;
         let pixels = self.canvas.pack_rect(rect);
         let c_rect = zectrix_epd_rect_t {
@@ -107,12 +128,7 @@ impl EpdDisplay {
             height: rect.height as i32,
         };
         let refresh = check_epd("refresh EPD partial", unsafe {
-            zectrix_epd_refresh_partial_1bpp(
-                self.handle,
-                &c_rect,
-                pixels.as_ptr(),
-                pixels.len(),
-            )
+            zectrix_epd_refresh_partial_1bpp(self.handle, &c_rect, pixels.as_ptr(), pixels.len())
         });
         let power_off = check_epd("power off EPD", unsafe {
             zectrix_epd_power_off(self.handle)
