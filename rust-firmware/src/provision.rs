@@ -2,9 +2,9 @@
 //! module doc on `wifi::scan_networks` for why) and enter its password with
 //! a UP/DOWN character wheel, then verify the connection before saving.
 //!
-//! Entered from the main loop by holding UP for `ENTER_HOLD_POLLS`. Runs its
-//! own blocking poll loop and returns once the user finishes or cancels, so
-//! the main loop's counters/clock logic doesn't need to know about it.
+//! Entered from the main loop by holding UP for `ENTER_HOLD`. Runs its own
+//! blocking poll loop and returns once the user finishes or cancels, so the
+//! main loop's counters/clock logic doesn't need to know about it.
 
 use std::thread;
 use std::time::Duration;
@@ -19,9 +19,10 @@ use crate::storage::{PersistedCounters, WifiCreds};
 use crate::watchdog;
 use crate::wifi;
 
-/// Poll cycles (x20ms) UP must be held from the main screen to enter setup.
-/// Matches the DOWN-hold-for-deep-sleep gesture already used in `main.rs`.
-pub const ENTER_HOLD_POLLS: u32 = 150;
+/// How long UP must be held from the main screen to enter setup. Wall-clock,
+/// matching the DOWN-hold-for-deep-sleep gesture in `main.rs` (see that
+/// constant's doc comment for why this isn't a poll-cycle count).
+pub const ENTER_HOLD: Duration = Duration::from_secs(3);
 
 /// Longest password this UI will build. WPA2-PSK tops out at 63 chars.
 const MAX_PASSWORD_LEN: usize = 63;

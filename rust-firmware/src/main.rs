@@ -20,6 +20,7 @@ use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
 use canvas::Rect;
 use display::ButtonCounts;
+use esp_idf_svc::systime::EspSystemTime;
 use rtc::DateTime;
 use storage::PersistedCounters;
 
@@ -46,11 +47,12 @@ const CLOCK_RECT: Rect = Rect {
     height: 32,
 };
 
-/// Hold DOWN for this many poll cycles (× 20 ms) to enter deep sleep.
-/// 150 × 20 ms = 3 s of continuous press, intentionally longer than the
-/// 1 s "long press" already used for full-refresh / clean-ghosting so the
+/// Hold DOWN for this long (wall-clock, not poll cycles - a poll-cycle
+/// counter under-counts whenever an iteration blocks for a while, e.g. the
+/// full EPD refresh the 1 s "long press" gesture triggers mid-hold) to
+/// enter deep sleep. Intentionally longer than that 1 s long-press so the
 /// two gestures don't collide.
-const DEEP_SLEEP_HOLD_POLLS: u32 = 150;
+const DEEP_SLEEP_HOLD: Duration = Duration::from_secs(3);
 
 /// Epoch seconds captured at firmware build time. Used as the fallback RTC
 /// seed when PCF8563 reports `voltage_low = true` (battery was disconnected
@@ -207,7 +209,7 @@ fn main() -> Result<()> {
     // keeps working regardless. Skipped on a deep-sleep wake with a healthy
     // RTC so ENTER wakes the device up instantly instead of blocking on the
     // network for several seconds.
-    let _wifi_sta = if !needs_wifi_sync {
+    let wifi_sta = if !needs_wifi_sync {
         log::info!("Woke from deep sleep with a healthy RTC; skipping Wi-Fi/NTP resync");
         None
     } else {
@@ -247,16 +249,22 @@ fn main() -> Result<()> {
             }
         }
     };
+    // Drop the boot-time connection instead of holding the modem for the
+    // rest of the program: nothing else here needs Wi-Fi to stay up, and
+    // keeping it claimed would block the setup wizard (holding UP) from
+    // ever constructing its own EspWifi - only one may exist at a time.
+    drop(wifi_sta);
 
     let mut led_on = false;
     let mut led_tick = 0u32;
     let mut status_tick = 0u32;
     let mut clock_tick = 0u32;
     let mut idle_since_save = COUNTER_SAVE_IDLE_POLLS; // mark counters as saved on boot
-    let mut down_held_polls: u32 = 0;
-    let mut up_held_polls: u32 = 0;
+    let mut down_held_since: Option<Duration> = None;
+    let mut up_held_since: Option<Duration> = None;
     loop {
         watchdog::feed();
+        let now = EspSystemTime {}.now();
 
         led_tick += 1;
         if led_tick >= 12 {
@@ -320,29 +328,31 @@ fn main() -> Result<()> {
                     log::info!("UP pressed count={}", counts.up);
                     dirty.push(count_rect(255, 166, counts.up));
                     idle_since_save = 0;
-                    up_held_polls = 1;
+                    up_held_since = Some(now);
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("UP long pressed; full refresh to clean ghosting");
                     full_refresh = true;
-                    up_held_polls = up_held_polls.max(1);
                 }
                 ButtonEvent::Released => {
-                    up_held_polls = 0;
+                    up_held_since = None;
                 }
             }
-        } else if up_held_polls > 0 {
-            // Continue counting polls while UP stays low even if no new
-            // button event fires this cycle.
-            up_held_polls = up_held_polls.saturating_add(1);
+        }
+        // Wall-clock hold check, not a poll-cycle count: an iteration that
+        // triggers a full EPD refresh (e.g. the long-press above) can block
+        // for well over a second, and a cycle counter would undercount that
+        // dead time instead of reflecting how long the button was actually
+        // held.
+        if let Some(since) = up_held_since {
+            if now.saturating_sub(since) >= provision::ENTER_HOLD {
+                log::info!("UP held for 3 s; entering Wi-Fi setup wizard");
+                up_held_since = None;
+                provision::run(&mut board, &counters, &sysloop);
+                full_refresh = true;
+            }
         }
 
-        if up_held_polls == provision::ENTER_HOLD_POLLS {
-            log::info!("UP held for 3 s; entering Wi-Fi setup wizard");
-            up_held_polls = 0;
-            provision::run(&mut board, &counters, &sysloop);
-            full_refresh = true;
-        }
         if let Some(event) = board.key_down.poll() {
             match event {
                 ButtonEvent::Pressed => {
@@ -350,28 +360,24 @@ fn main() -> Result<()> {
                     log::info!("DOWN pressed count={}", counts.down);
                     dirty.push(count_rect(255, 224, counts.down));
                     idle_since_save = 0;
-                    down_held_polls = 1;
+                    down_held_since = Some(now);
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("DOWN long pressed; full refresh to clean ghosting");
                     full_refresh = true;
-                    down_held_polls = down_held_polls.max(1);
                 }
                 ButtonEvent::Released => {
-                    down_held_polls = 0;
+                    down_held_since = None;
                 }
             }
-        } else if down_held_polls > 0 {
-            // Continue counting polls while DOWN stays low even if no new
-            // button event fires this cycle.
-            down_held_polls = down_held_polls.saturating_add(1);
         }
-
-        if down_held_polls == DEEP_SLEEP_HOLD_POLLS {
-            log::info!("DOWN held for 3 s; entering deep sleep");
-            board.display.render_with_time(&counts, clock.as_ref());
-            board.display.refresh_full()?;
-            power::enter_deep_sleep_with_button_wake();
+        if let Some(since) = down_held_since {
+            if now.saturating_sub(since) >= DEEP_SLEEP_HOLD {
+                log::info!("DOWN held for 3 s; entering deep sleep");
+                board.display.render_with_time(&counts, clock.as_ref());
+                board.display.refresh_full()?;
+                power::enter_deep_sleep_with_button_wake();
+            }
         }
 
         if full_refresh {
