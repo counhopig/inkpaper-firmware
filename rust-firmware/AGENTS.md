@@ -1,0 +1,46 @@
+# rust-firmware — inkpaper-note4 crate
+
+## OVERVIEW
+全部产品代码所在的单 crate：ESP32-S3 固件，23 个平铺 src 模块（无子目录）+ 1 个 C++ EPD FFI 组件。入口 `src/main.rs:85`（`[[bin]] inkpaper-note4`）。
+
+## MODULE MAP (src/)
+| 分组 | 模块 | 职责 |
+|------|------|------|
+| 编排 | `main.rs` | boot 序列 + 20ms 轮询主循环；两个单例（NVS handle L97-105、WifiManager L214）在此创建 |
+| 硬件 | `board.rs` | 集中装配点 `Note4Board::take()`；GPIO/ADC/共享 I2C0（`Rc<RefCell<I2cDriver>>` 唯一实例） |
+| 硬件 | `power.rs` | 深睡/唤醒原因/GPIO17 RTC hold；`enter_deep_sleep_with_wakeups` 是唯一安全重启路径 |
+| 硬件 | `rtc.rs` | PCF8563 驱动 + 唯一硬件闹钟寄存器（L165-170） |
+| 硬件 | `button.rs` / `watchdog.rs` / `audio.rs` / `nfc.rs` | 消抖+短按/1s 长按；任务 WDT；ES8311；GT23SC6699 |
+| 渲染 | `canvas.rs` / `font.rs` / `font8x16.rs` / `display.rs` | 1bpp 帧缓冲；5×7 定宽；比例宽字模；EPD FFI 封装 + 主界面布局 |
+| UI | `ui.rs` / `screens.rs` / `provision.rs` | 3 按键通用组件（列表选择、字符轮选输入）；日历/闹钟/待办菜单；Wi-Fi 配网向导 |
+| 服务 | `alarms.rs` / `todos.rs` / `storage.rs` | NVS store；闹钟负责挑最近一个武装 PCF8563 |
+| 协议 | `control.rs` / `usb_console.rs` / `ble_control.rs` / `sync.rs` / `wifi.rs` | `>>IP `/`<<IP ` 命令协议（USB/BLE 共用 `control::dispatch`）；HTTPS 同步；WifiManager |
+
+## FFI COMPONENT: components/zectrix_epd/
+官方 SSD2683 C++ 驱动（784 LOC `.cc`），经 Cargo.toml `extra_components` + bindgen 生成 `zectrix_epd` 模块。`private_include/ssd2683_waveform.h` 是校准波形数据，**禁止删除**。EPD 电源/时序只能走 `zectrix_epd_power_on/off` FFI（`display.rs:92-136`）。
+
+## CONVENTIONS (crate-level)
+- 错误处理统一 `anyhow::Result`；外设初始化一律收进 `Note4Board::take()`，不在各模块自行 `Peripherals::steal()`。
+- `main.rs` 的 mod 声明按字母序。
+- 字模数据表用 `#[rustfmt::skip]`（`font8x16.rs`）。
+- 构建注入：`build.rs` 发 `BUILD_EPOCH_SECS`（RTC 兜底）；rustflags 含 `--cfg espidf_time64`。
+
+## ANTI-PATTERNS (code-enforced)
+根 AGENTS.md 的红线在本 crate 的具体执行点：
+- **Wi-Fi 三铁律**（`wifi.rs`）：① 每 boot 只允许一次成功 `connect()`——非首次调用方必须先查 `used()`，true 则走 `restart_for_fresh_wifi_session()`（守卫实例：`sync.rs:171-181`、`provision.rs:102-113`、`control.rs:105-112`）；② **永不调 `esp_wifi_stop()`**（L205-218，stop→start 即崩溃触发点，`start()` 每进程一次）；③ 重启只用深睡路径，**不用 `esp_restart()`**（L253-281）。Wi-Fi 配置必须 `WIFI_STORAGE_RAM`（L108-113）。重启后 sync 不自动续跑，由调用方重试。
+- **BLE**（`ble_control.rs`）：NimBLE 回调线程**禁止碰 `Note4Board`**，只 push channel，dispatch 仅在主循环（L80-83）；`deinit_full()` 后每次 `start()` 必须显式 `BLEDevice::init()`（L55-58）。BLE 与 Wi-Fi 共享射频，永不同时开——BLE 只在配对页存活。
+- **RTC 闹钟**：只有一个硬件槽，多闹钟时必须总是写时间最近的那个（`alarms::next_due`，`rtc.rs:165-170`）；boot 时 `clear_alarm()` 清残留（`board.rs:92-94`）。
+- **上电时序**：GPIO42(AVDD) 拉高必须先于 I2C0 init（`board.rs:69-70, 87`）；唤醒后先 `release_power_latch_hold()` 再在 GPIO17 上建 PinDriver（`power.rs:33-36` → `board.rs:61`）。
+- **EPD**：4bpp 全刷后必须先做一次 1bpp 全刷才能恢复局刷；局刷前确认电源经 FFI 管理。
+- **闹钟/待办 `id` 在列表内不得冲突**（sync-api 契约）；命令只在 Home 主循环轮询，菜单页不响应。
+
+## COMMANDS
+```bash
+./scripts/build-rust.sh --release   # 从仓库根跑；crate 内裸 cargo build 需已 source ESP-IDF 环境
+cargo +esp fmt -- --check           # crate 目录内
+```
+
+## NOTES
+- `.cargo/config.toml` 的 `IDF_PATH`/`LIBCLANG_PATH` 是机器相关的，见根 AGENTS.md NOTES。
+- 改 `sdkconfig.defaults` 时对照根红线 #2（DIO）与 partitions.csv 6 层相对路径约定。
+- 无测试可跑；验证 = 烧录 + monitor（根 AGENTS.md COMMANDS）。

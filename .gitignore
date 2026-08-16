@@ -8,3 +8,4 @@ rust-firmware/target/
 rust-firmware/.embuild/
 *.pyc
 __pycache__/
+.omo/
