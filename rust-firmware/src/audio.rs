@@ -199,6 +199,9 @@ impl Es8311 {
     /// Streams a sine tone straight to the I2S TX channel in small
     /// stack-buffered chunks, so a multi-second tone never needs a single
     /// large heap allocation (see the note on [`Es8311::play_pcm_stereo`]).
+    /// Not called anywhere yet - kept for whatever plays the first real
+    /// notification/alert sound.
+    #[allow(dead_code)]
     pub fn play_sine_stereo(&mut self, freq_hz: f32, duration_secs: f32, amplitude: i16) -> Result<()> {
         self.pa_enable.set_high()?;
         thread::sleep(Duration::from_millis(10));

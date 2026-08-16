@@ -57,6 +57,9 @@ impl NfcTag {
     }
 
     /// True when an external NFC field (e.g. a phone) is currently in range.
+    /// Not called anywhere yet - kept for whatever content-layer feature
+    /// reacts to a tap.
+    #[allow(dead_code)]
     pub fn field_present(&self) -> bool {
         self.field_detect.is_low()
     }
@@ -76,7 +79,10 @@ impl NfcTag {
             .map_err(|e| anyhow!("NFC read block 0x{block_addr:02x} failed: {e}"))
     }
 
-    /// Reads the first 7 bytes of the UID block (block 0).
+    /// Reads the first 7 bytes of the UID block (block 0). Not called
+    /// anywhere yet - kept for whatever content-layer feature identifies
+    /// tags.
+    #[allow(dead_code)]
     pub fn read_uid(&mut self) -> Result<[u8; 7]> {
         let mut block = [0u8; BLOCK_SIZE];
         self.read_block(UID_BLOCK, &mut block)?;
