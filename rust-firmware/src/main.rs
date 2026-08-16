@@ -1,3 +1,4 @@
+mod audio;
 mod board;
 mod button;
 mod canvas;
@@ -140,6 +141,31 @@ fn main() -> Result<()> {
     board.display.render_with_time(&counts, clock.as_ref());
     board.display.refresh_full()?;
     log::info!("Initial display refresh completed");
+
+    // TEMPORARY hardware bring-up check for the ES8311 codec: play a short
+    // beep once at boot so it's audible without needing a dedicated gesture.
+    // Remove or gate this behind a real trigger once confirmed working -
+    // nobody wants a mandatory startup chime forever.
+    match board.audio.as_mut() {
+        Some(codec) => {
+            // Two clearly distinct pitches with a gap between them: makes it
+            // easy to tell "clean tone, pitch changed" from "hiss/noise, no
+            // discernible pitch change" when listening. Streamed in small
+            // chunks rather than one big buffer - see play_sine_stereo's
+            // doc comment for why.
+            let result = codec
+                .play_sine_stereo(440.0, 0.6, 10000)
+                .and_then(|()| {
+                    thread::sleep(Duration::from_millis(250));
+                    codec.play_sine_stereo(880.0, 0.6, 10000)
+                });
+            match result {
+                Ok(()) => log::info!("ES8311 bring-up tone played"),
+                Err(err) => log::warn!("ES8311 bring-up tone failed: {err}"),
+            }
+        }
+        None => log::warn!("ES8311 not available; skipping bring-up tone"),
+    }
 
     report_power_state(&mut board)?;
 

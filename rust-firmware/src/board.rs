@@ -1,16 +1,26 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use anyhow::{Context, Result};
 use esp_idf_svc::hal::adc::attenuation::DB_12;
 use esp_idf_svc::hal::adc::oneshot::{config::AdcChannelConfig, AdcChannelDriver, AdcDriver};
 use esp_idf_svc::hal::gpio::{Input, Output, PinDriver, Pull};
 use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
+use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx};
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::hal::units::Hertz;
 
+use crate::audio::{self, Es8311};
 use crate::button::Button;
 use crate::display::EpdDisplay;
 use crate::power;
 use crate::rtc::{Pcf8563, PCF8563_ADDR};
 pub type BoardAdc = AdcDriver<'static, esp_idf_svc::hal::adc::ADCU1>;
+
+/// I2C0 is shared between the PCF8563 RTC and the ES8311 audio codec, so
+/// both hold a clone of the same driver instance rather than each owning
+/// their own (only one `I2cDriver` may be installed per port).
+pub type SharedI2c = Rc<RefCell<I2cDriver<'static>>>;
 
 const BATTERY_ADC_CHANNEL_CONFIG: AdcChannelConfig = AdcChannelConfig {
     attenuation: DB_12,
@@ -30,7 +40,10 @@ pub struct Note4Board {
     charge_done: PinDriver<'static, Input>,
     adc: BoardAdc,
     pub display: EpdDisplay,
-    pub rtc: Pcf8563<'static>,
+    pub rtc: Pcf8563,
+    /// `None` when the ES8311 failed to initialize; the rest of the board
+    /// (display/buttons/RTC/Wi-Fi) still works without it.
+    pub audio: Option<Es8311>,
 }
 
 impl Note4Board {
@@ -74,11 +87,40 @@ impl Note4Board {
             &i2c_config,
         )
         .context("failed to install I2C0 driver on GPIO47/48")?;
-        let mut rtc = Pcf8563::new(i2c, PCF8563_ADDR);
+        let i2c_bus: SharedI2c = Rc::new(RefCell::new(i2c));
+        let mut rtc = Pcf8563::new(i2c_bus.clone(), PCF8563_ADDR);
         rtc.probe().context("PCF8563 not responding on I2C bus")?;
         if let Err(err) = rtc.clear_alarm() {
             log::warn!("PCF8563 clear_alarm failed: {err}");
         }
+
+        // ES8311 audio codec: I2S0 TX on GPIO14/15/38/45 (MCLK/BCLK/WS/DOUT),
+        // speaker PA enabled on GPIO46, control registers over the I2C0 bus
+        // shared with the RTC above. Soft-fails (logs and leaves `audio` as
+        // `None`) rather than aborting board bring-up, since this hardware
+        // path is unverified and the rest of the device should stay usable
+        // even if the codec doesn't come up.
+        let pa_enable = PinDriver::output(pins.gpio46)?;
+        let audio = match I2sDriver::<I2sTx>::new_std_tx(
+            peripherals.i2s0,
+            &audio::i2s_std_config(),
+            pins.gpio15,        // BCLK
+            pins.gpio45,        // DOUT
+            Some(pins.gpio14),  // MCLK
+            pins.gpio38,        // WS/LRCK
+        ) {
+            Ok(i2s) => match Es8311::new(i2c_bus.clone(), audio::ES8311_ADDR, i2s, pa_enable) {
+                Ok(codec) => Some(codec),
+                Err(err) => {
+                    log::warn!("ES8311 init failed: {err}");
+                    None
+                }
+            },
+            Err(err) => {
+                log::warn!("I2S0 TX channel setup failed: {err}");
+                None
+            }
+        };
 
         Ok(Self {
             _power_latch: power_latch,
@@ -92,6 +134,7 @@ impl Note4Board {
             adc,
             display,
             rtc,
+            audio,
         })
     }
 

@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
-use esp_idf_svc::hal::i2c::I2cDriver;
 use esp_idf_svc::sys::TickType_t;
+
+use crate::board::SharedI2c;
 
 pub const PCF8563_ADDR: u8 = 0x51;
 const I2C_TIMEOUT_TICKS: TickType_t = 100; // 100 ms RTOS ticks
@@ -77,18 +78,19 @@ fn bin_to_bcd(b: u8) -> u8 {
     ((b / 10) << 4) | (b % 10)
 }
 
-pub struct Pcf8563<'d> {
-    bus: I2cDriver<'d>,
+pub struct Pcf8563 {
+    bus: SharedI2c,
     addr: u8,
 }
 
-impl<'d> Pcf8563<'d> {
-    pub fn new(bus: I2cDriver<'d>, addr: u8) -> Self {
+impl Pcf8563 {
+    pub fn new(bus: SharedI2c, addr: u8) -> Self {
         Self { bus, addr }
     }
 
     fn read_regs(&mut self, reg: u8, out: &mut [u8]) -> Result<()> {
         self.bus
+            .borrow_mut()
             .write_read(self.addr, &[reg], out, I2C_TIMEOUT_TICKS)
             .map_err(|e| anyhow!("PCF8563 read regs 0x{reg:02x} failed: {e}"))
     }
@@ -105,6 +107,7 @@ impl<'d> Pcf8563<'d> {
         buf[0] = start_reg;
         buf[1..=bytes.len()].copy_from_slice(bytes);
         self.bus
+            .borrow_mut()
             .write(self.addr, &buf[..=bytes.len()], I2C_TIMEOUT_TICKS)
             .map_err(|e| anyhow!("PCF8563 write regs 0x{start_reg:02x} failed: {e}"))
     }

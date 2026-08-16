@@ -132,7 +132,7 @@ pub fn scan_networks(sysloop: &EspSystemEventLoop) -> Result<Vec<AccessPointInfo
 
 /// Starts the SNTP client, waits for the first sync and pushes the obtained
 /// time into the PCF8563 RTC.
-pub fn ntp_sync_and_set_rtc(rtc: &mut Pcf8563<'_>) -> Result<()> {
+pub fn ntp_sync_and_set_rtc(rtc: &mut Pcf8563) -> Result<()> {
     let sntp = EspSntp::new(&SntpConf {
         servers: ["pool.ntp.org", "ntp.aliyun.com"],
         ..Default::default()
