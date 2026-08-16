@@ -48,6 +48,28 @@ impl UsbConsole {
     pub fn start() -> Self {
         let (tx, rx) = mpsc::sync_channel(CHANNEL_CAPACITY);
 
+        // Pinned to the same core as the main task (Core0) rather than
+        // left to the scheduler's default (either core). ESP32-S3's flash
+        // cache has to be disabled on *both* cores during any flash/NVS
+        // write; if this reader thread landed on the other core and
+        // happened to be mid instruction-fetch from flash-mapped code at
+        // that exact moment, it crashed with
+        // `Guru Meditation Error: Cache error` at `_UserExceptionVector` -
+        // reproduced on real hardware while chasing a seemingly unrelated
+        // Wi-Fi bug (see `wifi::WifiManager`'s doc comment for that saga;
+        // this thread being on the wrong core is suspected to be the
+        // actual root cause behind at least some of those crashes, not
+        // Wi-Fi reconnection itself). Reset to the default (unpinned)
+        // config immediately after spawning so this doesn't affect any
+        // other `thread::spawn` call elsewhere in the program.
+        let pinned = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration {
+            pin_to_core: Some(esp_idf_svc::hal::cpu::Core::Core0),
+            ..Default::default()
+        };
+        if let Err(err) = pinned.set() {
+            log::warn!("Failed to pin USB console reader thread to Core0: {err}");
+        }
+
         thread::spawn(move || {
             let stdin = std::io::stdin();
             let mut handle = stdin.lock();
@@ -105,6 +127,11 @@ impl UsbConsole {
                 }
             }
         });
+
+        if let Err(err) = esp_idf_svc::hal::task::thread::ThreadSpawnConfiguration::default().set()
+        {
+            log::warn!("Failed to reset thread spawn configuration after pinning: {err}");
+        }
 
         Self { rx }
     }

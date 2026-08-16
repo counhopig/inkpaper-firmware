@@ -85,23 +85,47 @@ pub fn dispatch(
     cmd: Command,
     board: &mut Note4Board,
     counters: &PersistedCounters,
-    sysloop: &esp_idf_svc::eventloop::EspSystemEventLoop,
+    wifi_mgr: &mut wifi::WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
     now: Option<&DateTime>,
 ) -> Reply {
     match cmd {
         Command::SetWifi { ssid, password } => {
+            let creds = WifiCreds { ssid, password };
+
+            // A second in-process Wi-Fi connect crashes (see
+            // `WifiManager`'s doc comment). Unlike `sync::sync_now`, there's
+            // no clean way to verify-then-reply-then-restart here (the
+            // restart happens before any reply could reach the client), so
+            // this path skips the usual verify-before-save step and just
+            // saves the credentials directly - the next boot's normal
+            // `needs_wifi_sync` connect attempt effectively verifies them
+            // instead. Documented in docs/control-protocol.md.
+            if wifi_mgr.used() {
+                return match counters.save_wifi_creds(&creds) {
+                    Ok(()) => {
+                        log::warn!(
+                            "USB control: Wi-Fi already used this session; saved '{}' unverified and restarting",
+                            creds.ssid
+                        );
+                        wifi::restart_for_fresh_wifi_session();
+                    }
+                    Err(err) => Reply::Error {
+                        message: format!("Failed to save credentials: {err}"),
+                    },
+                };
+            }
+
             // Attempt to connect and verify the credentials work before saving.
             // This matches `provision.rs`'s philosophy: only save credentials we
             // know are valid. If the connection fails, return an error without
             // saving to NVS.
-            let creds = WifiCreds { ssid, password };
-            match wifi::WifiSta::connect(&creds, sysloop) {
-                Ok(_sta) => {
-                    // Connection succeeded; drop it (we're not keeping a
+            match wifi_mgr.connect(&creds) {
+                Ok(()) => {
+                    // Connection succeeded; disconnect (we're not keeping a
                     // persistent connection) and save to NVS.
-                    drop(_sta);
+                    wifi_mgr.disconnect();
                     match counters.save_wifi_creds(&creds) {
                         Ok(()) => {
                             log::info!("USB control: Wi-Fi credentials saved for '{}'", creds.ssid);
@@ -147,50 +171,19 @@ pub fn dispatch(
         }
 
         Command::SyncNow => {
-            // Perform a full sync: fetch server config, check time, load etag,
-            // and call sync::fetch_and_apply. This mirrors the on-device
-            // sync_now_screen from screens.rs but returns a reply instead of
-            // displaying a message.
-
-            // Load server config.
-            let cfg = match counters.device_config() {
-                Ok(Some(cfg)) => cfg,
-                Ok(None) => {
-                    return Reply::Error {
-                        message: "Server not configured; use SetServer first".to_string(),
-                    }
-                }
-                Err(err) => {
-                    return Reply::Error {
-                        message: format!("Failed to load server config: {err}"),
-                    }
-                }
+            // `sync::sync_now` connects Wi-Fi (main.rs drops the boot-time
+            // connection once NTP sync is done, so one usually isn't
+            // already up by the time this command arrives), then does the
+            // fetch/apply/etag-save cycle - shared with the on-device
+            // "SYNC NOW" menu screen so the two paths can't drift.
+            let Some(now_dt) = now else {
+                return Reply::Error {
+                    message: "System time not available".to_string(),
+                };
             };
-
-            // Check current time is available.
-            let now_dt = match now {
-                Some(dt) => dt,
-                None => {
-                    return Reply::Error {
-                        message: "System time not available".to_string(),
-                    }
-                }
-            };
-
-            // Load cached ETag for conditional requests.
-            let etag = match counters.sync_etag() {
-                Ok(etag) => etag,
-                Err(err) => {
-                    log::warn!("USB control sync: failed to load etag: {err}");
-                    None
-                }
-            };
-
-            // Perform the sync.
-            match sync::fetch_and_apply(
-                &cfg.server_url,
-                &cfg.auth_token,
-                etag.as_deref(),
+            match sync::sync_now(
+                counters,
+                wifi_mgr,
                 alarm_store,
                 todo_store,
                 &mut board.rtc,
@@ -199,18 +192,10 @@ pub fn dispatch(
                 Ok(sync::SyncOutcome::Applied {
                     alarm_count,
                     todo_count,
-                    etag: new_etag,
+                    ..
                 }) => {
-                    // Save new ETag for future conditional requests.
-                    if let Some(new_etag) = new_etag {
-                        if let Err(err) = counters.save_sync_etag(&new_etag) {
-                            log::warn!("USB control sync: failed to save etag: {err}");
-                        }
-                    }
                     log::info!(
-                        "USB control sync completed: {} alarms, {} todos",
-                        alarm_count,
-                        todo_count
+                        "USB control sync completed: {alarm_count} alarms, {todo_count} todos"
                     );
                     Reply::Ok
                 }

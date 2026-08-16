@@ -193,6 +193,90 @@ chronologically nearest, and waking deep sleep on **either** GPIO0 (ENTER)
   yet confirmed against this project's actual generated sdkconfig - check
   in Phase 3 before writing `sync.rs`.
 
+## Post-Phase-6: Wi-Fi reconnect crash (found via real end-to-end testing)
+
+Testing the full desktop -> server -> device sync loop against real hardware
+(not just `cargo build`) surfaced a serious bug none of the earlier
+phase-by-phase testing caught: **a second Wi-Fi connect within one boot
+session reliably crashes** (`Guru Meditation Error`, three different
+signatures across three different mitigation attempts - `InstrFetchProhibited`
+on a second `EspWifi::new()`, the same on a second `esp_wifi_start()` after
+`esp_wifi_stop()`, and `Unhandled debug exception`/`BREAK instr` partway
+through a second connection's lifecycle with neither of those). Confirmed via
+web research to match a class of known, unresolved upstream bugs
+(espressif/esp-idf#7579, #11171; esp-rs/esp-idf-svc#503) with no official fix
+in this ESP-IDF/esp-idf-svc version - not something fixable by calling the
+API differently.
+
+**Fix**: `wifi::WifiManager` now owns the one shared `EspWifi` instance for
+the whole process and tracks whether it's been used; every non-boot Wi-Fi
+user (`sync::sync_now`, `provision::run`, `control.rs`'s `SetWifi` handler)
+checks this and, if Wi-Fi was already used this session, calls
+`wifi::restart_for_fresh_wifi_session()` instead of reconnecting in-process -
+so the next connect is always a fresh boot session's guaranteed-safe first
+one. The obvious choice for that restart, `esp_restart()`, turned out to hit
+the *same* crash class (apparently doing its own internal Wi-Fi-aware
+teardown) - it goes through `power::enter_deep_sleep_with_wakeups` with a
+~100ms timer wake instead, since deep sleep after an already-used Wi-Fi
+session has been exercised reliably many times elsewhere in this project
+(every DOWN-hold-3s sleep following a boot-time NTP sync).
+
+Also fixed en route: pinned the USB console reader thread to Core0
+(`esp_idf_hal::task::thread::ThreadSpawnConfiguration`), since a background
+thread on the other core executing flash-cached code during an NVS/flash
+write is a plausible contributor to this class of `Cache error` crash -
+though pinning alone did not fully explain the crash (the `esp_restart()`
+variant still crashed after pinning), so the deep-sleep-based restart is
+the actual fix, not this.
+
+**Also investigated and ruled out**: whether this was an esp-idf-svc
+(Rust wrapper) bug specifically, following a matching-looking upstream
+report (esp-rs/esp-idf-svc#503: a second `connect()` on one `EspWifi`
+panics inside the wrapper's own state tracking). `WifiManager::connect`/
+`disconnect` were rewritten to call raw `esp_wifi_connect()`/
+`esp_wifi_disconnect()` FFI directly, bypassing `EspWifi`'s wrapper
+methods entirely, matching the low-level sequence used by
+github.com/qiujun8023/slate - a working C++ reference firmware for this
+exact NOTE4 hardware that reconnects Wi-Fi repeatedly without crashing.
+**Tested with a real second connect (the restart guard temporarily
+disabled): identical crash, same PC address**, with or without the
+wrapper involved - so it's a lower-level ESP-IDF/hardware issue, not
+specific to esp-idf-svc. Slate's actual difference from this codebase is
+that it reconnects synchronously from inside its own
+`WIFI_EVENT_STA_DISCONNECTED` event handler, immediately on disconnect,
+rather than from arbitrary application code potentially much later -
+that context/timing difference is the leading remaining hypothesis for
+why theirs works, but reproducing it would mean restructuring Wi-Fi
+handling around the event loop rather than synchronous calls, which
+hasn't been attempted (the restart-based workaround is the shipped fix).
+The raw FFI calls were kept regardless, since they're no worse than the
+wrapper and match Slate's proven low-level sequence.
+
+**Trade-offs accepted, not solved**: `sync::sync_now`'s restart no longer
+auto-resumes the sync after rebooting (an earlier version tried this,
+reusing the boot's own fresh connection - that traded the reconnect crash
+for a *third* crash signature, apparently from chaining Wi-Fi connect + NTP
++ HTTPS/TLS too tightly in one boot sequence with no settling time). The
+caller (menu, USB, or BLE) just needs to retry after the restart completes.
+`control.rs`'s `SetWifi` also skips its usual verify-before-save step in
+this fallback path (no clean way to reply-then-restart over USB/BLE), so
+credentials are saved unverified and implicitly checked by the next boot's
+own connect attempt instead.
+
+**Verified**: the crash itself is gone - reproduced non-crashing across
+repeated `sync_now` calls after the fix (previously 100% reproducible).
+**Not independently verified by the agent**: whether the device reliably
+finishes the deep-sleep-based restart and resumes normal operation
+afterward - headless testing via raw `termios`/DTR manipulation (no real
+serial terminal was available in this environment) could not reliably
+re-establish a serial connection after a genuine deep-sleep wake cycle
+(the port node reliably reappears and `espflash` can always reach the
+chip, but ad-hoc port reads afterward inconsistently returned no data -
+suspected to be a test-methodology/USB-re-enumeration-timing artifact,
+not a firmware issue, but not confirmed either way). **Needs a real
+`espflash monitor` session to confirm**: trigger `sync_now` twice in a row
+and watch the device restart cleanly and come back up between them.
+
 ## Verification (every phase)
 
 - `cargo +esp fmt --manifest-path rust-firmware/Cargo.toml -- --check` and

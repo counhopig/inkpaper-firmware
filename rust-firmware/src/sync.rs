@@ -16,8 +16,10 @@ use serde::Deserialize;
 
 use crate::alarms::{self, AlarmStore, StoredAlarm};
 use crate::rtc::{DateTime, Pcf8563};
+use crate::storage::PersistedCounters;
 use crate::todos::{Todo, TodoStore};
 use crate::watchdog;
+use crate::wifi;
 
 /// Response bodies from a compliant server are small (alarms/todos are
 /// themselves capped to a couple KB each in NVS - see `alarms::BLOB_BUF_LEN`
@@ -131,4 +133,81 @@ pub fn fetch_and_apply(
         todo_count: parsed.todos.len(),
         etag: new_etag,
     })
+}
+
+/// Full "Sync Now" flow, shared by the on-device menu (`screens.rs`) and
+/// the USB/BLE `SyncNow` command (`control.rs`): connects Wi-Fi using the
+/// stored credentials (via the process's one shared `WifiManager` - see
+/// its doc comment for why a fresh `EspWifi` per call crashes), loads
+/// server config + cached ETag, calls `fetch_and_apply`, persists any new
+/// ETag, then disconnects Wi-Fi again - mirroring `main.rs`'s boot-time
+/// "connect only for as long as needed" pattern. `fetch_and_apply` itself
+/// has no idea whether Wi-Fi is up; both call sites used to assume it
+/// already was (main.rs disconnects after the initial NTP sync, so by the
+/// time a user actually presses "Sync Now" minutes or hours later, there
+/// is no active STA connection) - confirmed as a real bug via an
+/// end-to-end hardware test (`ESP_ERR_HTTP_CONNECT` / "Host is
+/// unreachable"), not just a hypothetical.
+pub fn sync_now(
+    counters: &PersistedCounters,
+    wifi_mgr: &mut wifi::WifiManager,
+    alarm_store: &AlarmStore,
+    todo_store: &TodoStore,
+    rtc: &mut Pcf8563,
+    now: &DateTime,
+) -> Result<SyncOutcome> {
+    let creds = counters
+        .wifi_creds()
+        .map_err(|e| anyhow!("failed to load Wi-Fi credentials: {e}"))?
+        .ok_or_else(|| {
+            anyhow!("Wi-Fi not configured; use SetWifi or the on-device wizard first")
+        })?;
+    let cfg = counters
+        .device_config()
+        .map_err(|e| anyhow!("failed to load server config: {e}"))?
+        .ok_or_else(|| anyhow!("Server not configured; use SetServer first"))?;
+    let etag = counters.sync_etag().ok().flatten();
+
+    if wifi_mgr.used() {
+        // A second in-process Wi-Fi connect crashes even with raw
+        // `esp_wifi_connect()`/`esp_wifi_disconnect()` FFI calls, bypassing
+        // `EspWifi`'s own connect/status-tracking entirely (confirmed by
+        // deliberately testing a real second connect here: identical crash,
+        // same PC address, with or without the wrapper) - so this isn't an
+        // esp-idf-svc-specific bug, it's lower-level than that. Restart
+        // cleanly instead of attempting it; see `WifiManager`'s doc comment
+        // for the full investigation and why `restart_for_fresh_wifi_session`
+        // goes through deep sleep rather than `esp_restart()`.
+        wifi::restart_for_fresh_wifi_session();
+    }
+
+    wifi_mgr
+        .connect(&creds)
+        .map_err(|e| anyhow!("Wi-Fi connect failed: {e}"))?;
+
+    let outcome = fetch_and_apply(
+        &cfg.server_url,
+        &cfg.auth_token,
+        etag.as_deref(),
+        alarm_store,
+        todo_store,
+        rtc,
+        now,
+    );
+
+    // Disconnect regardless of outcome - nothing else needs Wi-Fi to stay
+    // connected after this.
+    wifi_mgr.disconnect();
+
+    if let Ok(SyncOutcome::Applied {
+        etag: Some(ref new_etag),
+        ..
+    }) = outcome
+    {
+        if let Err(err) = counters.save_sync_etag(new_etag) {
+            log::warn!("Failed to save sync ETag: {err}");
+        }
+    }
+
+    outcome
 }

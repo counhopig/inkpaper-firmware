@@ -2,8 +2,6 @@
 //! short-press (see `main.rs`). Each screen is a self-contained blocking
 //! function, following the convention established in `provision.rs`.
 
-use esp_idf_svc::eventloop::EspSystemEventLoop;
-
 use crate::alarms::{self, AlarmStore, Repeat, StoredAlarm};
 use crate::board::Note4Board;
 use crate::provision;
@@ -14,6 +12,7 @@ use crate::todos::{self, Todo, TodoStore};
 use crate::ui::{
     enter_text, footer, header, pick_from_list, pick_number, poll_nav, show_message, tick, Nav,
 };
+use crate::wifi::WifiManager;
 
 /// Entry point from Home's ENTER short-press: shows the top-level menu and
 /// recurses into whichever screen the user picks, returning once they back
@@ -23,7 +22,7 @@ use crate::ui::{
 pub fn open_menu(
     board: &mut Note4Board,
     counters: &PersistedCounters,
-    sysloop: &EspSystemEventLoop,
+    wifi_mgr: &mut WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
     now: Option<&DateTime>,
@@ -49,8 +48,8 @@ pub fn open_menu(
             1 => alarms_screen(board, alarm_store, now),
             2 => todos_screen(board, todo_store),
             3 => server_setup_screen(board, counters),
-            4 => sync_now_screen(board, counters, alarm_store, todo_store, now),
-            5 => provision::run(board, counters, sysloop),
+            4 => sync_now_screen(board, counters, wifi_mgr, alarm_store, todo_store, now),
+            5 => provision::run(board, counters, wifi_mgr),
             6 => ble_pairing_screen(board, ble_control),
             _ => {}
         }
@@ -302,66 +301,34 @@ fn server_setup_screen(board: &mut Note4Board, counters: &PersistedCounters) {
     }
 }
 
-/// Sync screen: fetches alarms and todos from the configured server,
-/// applies them to the local stores, and displays the result.
+/// Sync screen: connects Wi-Fi, fetches alarms and todos from the
+/// configured server, applies them to the local stores, and displays the
+/// result. All the actual work is `sync::sync_now` - shared with the
+/// USB/BLE `SyncNow` command so the two paths can't drift (in particular,
+/// both must connect Wi-Fi first: `main.rs` drops the boot-time connection
+/// once NTP sync is done, so by the time a user reaches this screen there
+/// usually isn't an active Wi-Fi connection to piggyback on).
 fn sync_now_screen(
     board: &mut Note4Board,
     counters: &PersistedCounters,
+    wifi_mgr: &mut WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
     now: Option<&DateTime>,
 ) {
-    // Load the server configuration.
-    let cfg = match counters.device_config() {
-        Ok(Some(cfg)) => cfg,
-        Ok(None) => {
-            show_message(
-                board,
-                "NOT CONFIGURED",
-                &["Please set up the server first"],
-                std::time::Duration::from_secs(2),
-            );
-            return;
-        }
-        Err(err) => {
-            show_message(
-                board,
-                "ERROR",
-                &["Failed to load server config"],
-                std::time::Duration::from_secs(2),
-            );
-            log::warn!("Failed to load server config: {err}");
-            return;
-        }
+    let Some(now_dt) = now else {
+        show_message(
+            board,
+            "NO CLOCK",
+            &["Clock not available"],
+            std::time::Duration::from_secs(2),
+        );
+        return;
     };
 
-    // Load the last-seen ETag for conditional requests.
-    let etag = match counters.sync_etag() {
-        Ok(etag) => etag,
-        Err(err) => {
-            log::warn!("Failed to load sync ETag: {err}");
-            None
-        }
-    };
-
-    // Perform the sync.
-    let now_dt = match now {
-        Some(dt) => dt,
-        None => {
-            show_message(
-                board,
-                "NO CLOCK",
-                &["Clock not available"],
-                std::time::Duration::from_secs(2),
-            );
-            return;
-        }
-    };
-
-    match sync::fetch_and_apply(
-        &cfg.server_url,
-        &cfg.auth_token,
-        etag.as_deref(),
+    match sync::sync_now(
+        counters,
+        wifi_mgr,
         alarm_store,
         todo_store,
         &mut board.rtc,
@@ -370,14 +337,8 @@ fn sync_now_screen(
         Ok(sync::SyncOutcome::Applied {
             alarm_count,
             todo_count,
-            etag: new_etag,
+            ..
         }) => {
-            // Save the new ETag for future conditional requests.
-            if let Some(new_etag) = new_etag {
-                if let Err(err) = counters.save_sync_etag(&new_etag) {
-                    log::warn!("Failed to save sync ETag: {err}");
-                }
-            }
             let msg = format!("Alarms: {} Todos: {}", alarm_count, todo_count);
             show_message(board, "SYNC OK", &[&msg], std::time::Duration::from_secs(2));
         }

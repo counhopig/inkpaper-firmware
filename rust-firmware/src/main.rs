@@ -204,6 +204,15 @@ fn main() -> Result<()> {
     // the main loop by holding UP, or from the menu) can use it.
     let sysloop = esp_idf_svc::eventloop::EspSystemEventLoop::take()?;
 
+    // Also created exactly once and reused for the rest of the program -
+    // see `wifi::WifiManager`'s doc comment for why: a second
+    // `EspWifi::new()` anywhere in the process reliably crashes
+    // (`Guru Meditation Error: InstrFetchProhibited`), confirmed on real
+    // hardware, so every Wi-Fi user (boot-time sync below, the setup
+    // wizard, `sync::sync_now`) shares this one instance instead of each
+    // creating and dropping its own.
+    let mut wifi_mgr = wifi::WifiManager::new(&sysloop)?;
+
     // Optional Wi-Fi bring-up: connect with credentials stored in NVS
     // (`wifi_ssid` / `wifi_pass`), then sync the clock over NTP and push the
     // time into the PCF8563 so it keeps ticking while the device sleeps.
@@ -211,13 +220,12 @@ fn main() -> Result<()> {
     // keeps working regardless. Skipped on a deep-sleep wake with a healthy
     // RTC so ENTER wakes the device up instantly instead of blocking on the
     // network for several seconds.
-    let wifi_sta = if !needs_wifi_sync {
+    if !needs_wifi_sync {
         log::info!("Woke from deep sleep with a healthy RTC; skipping Wi-Fi/NTP resync");
-        None
     } else {
         match counters.wifi_creds() {
-            Ok(Some(creds)) => match wifi::WifiSta::connect(&creds, &sysloop) {
-                Ok(sta) => {
+            Ok(Some(creds)) => match wifi_mgr.connect(&creds) {
+                Ok(()) => {
                     match wifi::ntp_sync_and_set_rtc(&mut board.rtc) {
                         Ok(()) => match board.rtc.read_time() {
                             Ok(dt) => {
@@ -237,31 +245,18 @@ fn main() -> Result<()> {
                         },
                         Err(err) => log::warn!("NTP sync failed: {err}"),
                     }
-                    Some(sta)
+                    wifi_mgr.disconnect();
                 }
-                Err(err) => {
-                    log::warn!("Wi-Fi connect failed: {err}");
-                    None
-                }
+                Err(err) => log::warn!("Wi-Fi connect failed: {err}"),
             },
             Ok(None) => {
                 log::info!(
                     "No Wi-Fi credentials in NVS; skipping connect (see scripts/gen-nvs-wifi.py)"
                 );
-                None
             }
-            Err(err) => {
-                log::warn!("Could not read Wi-Fi credentials from NVS: {err}");
-                None
-            }
+            Err(err) => log::warn!("Could not read Wi-Fi credentials from NVS: {err}"),
         }
     };
-    // Drop the boot-time connection instead of holding the modem for the
-    // rest of the program: nothing else here needs Wi-Fi to stay up, and
-    // keeping it claimed would block the setup wizard (holding UP, or from
-    // the menu) from ever constructing its own EspWifi - only one may exist
-    // at a time.
-    drop(wifi_sta);
 
     let mut led_on = false;
     let mut led_tick = 0u32;
@@ -320,7 +315,7 @@ fn main() -> Result<()> {
                 cmd,
                 &mut board,
                 &counters,
-                &sysloop,
+                &mut wifi_mgr,
                 &alarm_store,
                 &todo_store,
                 clock.as_ref(),
@@ -335,7 +330,7 @@ fn main() -> Result<()> {
                     cmd,
                     &mut board,
                     &counters,
-                    &sysloop,
+                    &mut wifi_mgr,
                     &alarm_store,
                     &todo_store,
                     clock.as_ref(),
@@ -351,7 +346,7 @@ fn main() -> Result<()> {
                     screens::open_menu(
                         &mut board,
                         &counters,
-                        &sysloop,
+                        &mut wifi_mgr,
                         &alarm_store,
                         &todo_store,
                         clock.as_ref(),
@@ -389,7 +384,7 @@ fn main() -> Result<()> {
             if now.saturating_sub(since) >= provision::ENTER_HOLD {
                 log::info!("UP held for 3 s; entering Wi-Fi setup wizard");
                 up_held_since = None;
-                provision::run(&mut board, &counters, &sysloop);
+                provision::run(&mut board, &counters, &mut wifi_mgr);
                 full_refresh = true;
             }
         }
