@@ -22,10 +22,13 @@
 - Wi-Fi STA 连接（`src/wifi.rs`，esp-idf-svc `EspWifi`）+ SNTP 时间同步，结果写回 PCF8563；仅在首次开机 / 上电复位 / RTC `voltage_low` 时才连网，避免每次深睡唤醒都联网。
 - **设备端 Wi-Fi 配网向导**（`src/provision.rs`）：主界面长按 UP 3 s 进入，扫描并从列表中选 AP（不用手打 SSID，从根源上避免大小写打错导致连不上——参见 `docs/wifi-connect-issue.md`），UP/DOWN 转字符轮盘输入密码，提交前先实际 `connect()` 验证成功才写入 NVS。仍保留 `scripts/gen-nvs-wifi.py` 作为脚本化供网的备选。
 - 统一的画布/字体层：`src/canvas.rs`（1bpp 帧缓冲 + 像素/矩形/文字绘制原语，独立于 EPD 驱动）+ `src/font.rs`（5×7 位图字模）；`display.rs` 只负责 EPD 句柄与屏幕布局。
+- ES8311 音频编解码器（`src/audio.rs`）：I2C0 控制寄存器初始化（16 kHz 单声道，MCLK=256x=4.096 MHz）+ I2S0 TX 播放（GPIO14/15/38/45），扬声器 PA 使能走 GPIO46。当前只做了硬件冒烟（开机放一段测试音），未接入真正的内容/TTS 播放。
+- GT23SC6699 NFC（`src/nfc.rs`）：I2C0 读 UID block（addr 0x55）+ 读 field-detect（GPIO7，低有效），供电走 GPIO21。同样只做了硬件冒烟（开机读一次 UID），完整 NDEF 读写未移植。
+- I2C0 现在由 RTC / 音频编解码器 / NFC 三者通过 `board::SharedI2c`（`Rc<RefCell<I2cDriver>>`）共享同一条总线实例。
 ### 尚未完成
 > 备注：以下功能当前**尚未**移植到本仓库：
 
-ES8311 音频、GT23SC6699 NFC、文件系统、OTA；内容协议未定（自研 HTTP / Slate 兼容 / 完全离线）。
+文件系统、OTA；内容协议未定，由用户自行设计后端与固件拉取逻辑（设备侧目前的设想是"只拉一张服务端渲好的 1bpp 位图，按 ETag 增量更新，固件不理解内容类型"，具体协议待定）。
 
 完整的环境、安全事项、构建、烧录、调试与故障排查见 **[docs/development-guide.md](docs/development-guide.md)**。
 
@@ -47,11 +50,13 @@ inkpaper/
 │   ├── sdkconfig.defaults           DIO / 80 MHz / OCT PSRAM / USB Serial/JTAG
 │   ├── src/
 │   │   ├── main.rs                  入口 + 按键事件 + 局刷/全刷循环 + Wi-Fi/深睡编排
-│   │   ├── board.rs                 电源锁存 / LED / 按键 / 充电 GPIO / oneshot ADC
+│   │   ├── audio.rs                 ES8311 编解码器（I2C 初始化 + I2S0 TX 播放）
+│   │   ├── board.rs                 电源锁存 / LED / 按键 / 充电 GPIO / oneshot ADC / SharedI2c
 │   │   ├── button.rs                消抖 + 短按/1s 长按
 │   │   ├── canvas.rs                1bpp 帧缓冲 + 像素/矩形/文字绘制原语
 │   │   ├── font.rs                  5x7 位图字模
 │   │   ├── display.rs               EPD Rust 封装 + 屏幕布局（依赖 canvas/font）
+│   │   ├── nfc.rs                   GT23SC6699 NFC（UID 读取 + field-detect）
 │   │   ├── power.rs                 深度睡眠 / GPIO17 RTC hold / 唤醒原因
 │   │   ├── provision.rs             设备端 Wi-Fi 配网向导（长按 UP 3s 进入）
 │   │   ├── rtc.rs                   PCF8563 驱动
@@ -148,8 +153,8 @@ espflash monitor --port /dev/ttyACM0
 2. ~~加入统一画布、字体与布局层。~~ 完成（`canvas.rs` + `font.rs`；`display.rs` 只剩 EPD 句柄与布局）。
 3. ~~NVS 设置、Wi-Fi 配网、时间同步。~~ 完成（`wifi.rs` + `provision.rs` 设备端向导 + SNTP）。
 4. ~~电池 ADC、充电状态、PCF8563 RTC 与低功耗策略。~~ 完成（深睡时 RTC GPIO17 hold；深睡唤醒且 RTC 健康时跳过 Wi-Fi/NTP 重连）。
-5. 音频（I2S + ES8311）、NFC（GT23SC6699）。
-6. 内容协议、内容缓存、文件系统。
+5. ~~音频（I2S + ES8311）、NFC（GT23SC6699）。~~ 硬件冒烟完成（`audio.rs` / `nfc.rs`，均已用实机验证）；真正的内容播放/NDEF 读写留给上层。
+6. 内容协议、内容缓存、文件系统 —— 由用户自行设计与实现（后端 + 固件拉取逻辑），本仓库暂不深入。
 7. OTA、回滚、看门狗与故障恢复。
 
 Slate 是一个参考实现，但本仓库会保持为你自己的 NOTE4 固件起点。
