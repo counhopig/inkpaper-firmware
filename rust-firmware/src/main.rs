@@ -124,7 +124,8 @@ fn main() -> Result<()> {
             if dt.voltage_low {
                 log::warn!("PCF8563 VL set (RTC battery low/lost); reseeding from build time");
                 needs_wifi_sync = true;
-                let seeded = DateTime::from_unix(BUILD_EPOCH_SECS);
+                let offset = counters.timezone_offset_minutes().unwrap_or(0);
+                let seeded = DateTime::from_unix(BUILD_EPOCH_SECS).shifted_minutes(offset as i32);
                 if let Err(err) = board.rtc.write_time(&seeded) {
                     log::warn!("PCF8563 reseed failed: {err}");
                 } else {
@@ -220,7 +221,8 @@ fn main() -> Result<()> {
         match counters.wifi_creds() {
             Ok(Some(creds)) => match wifi_mgr.connect(&creds) {
                 Ok(()) => {
-                    match wifi::ntp_sync_and_set_rtc(&mut board.rtc) {
+                    let timezone_offset = counters.timezone_offset_minutes().unwrap_or(0);
+                    match wifi::ntp_sync_and_set_rtc(&mut board.rtc, timezone_offset) {
                         Ok(()) => match board.rtc.read_time() {
                             Ok(dt) => {
                                 clock = Some(dt);

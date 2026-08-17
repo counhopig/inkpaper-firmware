@@ -260,7 +260,7 @@ pub fn restart_for_fresh_wifi_session() -> ! {
 
 /// Starts the SNTP client, waits for the first sync and pushes the obtained
 /// time into the PCF8563 RTC.
-pub fn ntp_sync_and_set_rtc(rtc: &mut Pcf8563) -> Result<()> {
+pub fn ntp_sync_and_set_rtc(rtc: &mut Pcf8563, timezone_offset_minutes: i16) -> Result<()> {
     let sntp = EspSntp::new(&SntpConf {
         servers: ["pool.ntp.org", "ntp.aliyun.com"],
         ..Default::default()
@@ -280,7 +280,7 @@ pub fn ntp_sync_and_set_rtc(rtc: &mut Pcf8563) -> Result<()> {
     }
 
     let epoch_secs = EspSystemTime {}.now().as_secs();
-    let dt = DateTime::from_unix(epoch_secs);
+    let dt = DateTime::from_unix(epoch_secs).shifted_minutes(timezone_offset_minutes as i32);
     rtc.write_time(&dt)
         .context("failed to write NTP time to PCF8563")?;
     log::info!(

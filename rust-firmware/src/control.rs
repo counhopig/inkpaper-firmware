@@ -39,6 +39,12 @@ pub enum Command {
 
     /// Query the device's current configuration and connectivity state.
     GetStatus,
+
+    /// Remove every locally stored alarm and disarm the RTC alarm slot.
+    ClearAlarms,
+
+    /// Set local time as a fixed UTC offset in minutes (UTC-12 through UTC+14).
+    SetTimezone { offset_minutes: i16 },
 }
 
 /// Reply sent back to a USB/BLE client.
@@ -230,6 +236,45 @@ pub fn dispatch(
                 wifi_configured,
                 server_configured,
                 wifi_connected,
+            }
+        }
+
+        Command::ClearAlarms => match alarm_store.save(&[]) {
+            Ok(()) => match board.rtc.clear_alarm() {
+                Ok(()) => {
+                    log::info!("USB/BLE control: all alarms cleared");
+                    Reply::Ok
+                }
+                Err(err) => Reply::Error {
+                    message: format!("Alarms cleared, but RTC disarm failed: {err}"),
+                },
+            },
+            Err(err) => Reply::Error {
+                message: format!("Failed to clear alarms: {err}"),
+            },
+        },
+
+        Command::SetTimezone { offset_minutes } => {
+            if !(-720..=840).contains(&offset_minutes) {
+                return Reply::Error {
+                    message: "Timezone offset must be between -720 and 840 minutes".to_string(),
+                };
+            }
+            let old_offset = counters.timezone_offset_minutes().unwrap_or(0);
+            let adjusted = board
+                .rtc
+                .read_time()
+                .map(|dt| dt.shifted_minutes((offset_minutes - old_offset) as i32));
+            match counters.save_timezone_offset_minutes(offset_minutes) {
+                Ok(()) => match adjusted.and_then(|dt| board.rtc.write_time(&dt)) {
+                    Ok(()) => Reply::Ok,
+                    Err(err) => Reply::Error {
+                        message: format!("Timezone saved, but RTC update failed: {err}"),
+                    },
+                },
+                Err(err) => Reply::Error {
+                    message: format!("Failed to save timezone: {err}"),
+                },
             }
         }
     }

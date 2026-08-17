@@ -63,6 +63,30 @@ impl DateTime {
             voltage_low: false,
         }
     }
+
+    pub fn to_unix(self) -> u64 {
+        let mut days = 0u64;
+        for year in 1970..self.year as i64 {
+            days += if is_leap(year) { 366 } else { 365 };
+        }
+        let month_days = if is_leap(self.year as i64) {
+            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        } else {
+            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        };
+        days += month_days
+            .iter()
+            .take(self.month.saturating_sub(1) as usize)
+            .map(|days| *days as u64)
+            .sum::<u64>();
+        days += self.day.saturating_sub(1) as u64;
+        days * 86_400 + self.hour as u64 * 3_600 + self.minute as u64 * 60 + self.second as u64
+    }
+
+    pub fn shifted_minutes(self, minutes: i32) -> Self {
+        let shifted = (self.to_unix() as i64 + minutes as i64 * 60).max(0) as u64;
+        Self::from_unix(shifted)
+    }
 }
 
 pub(crate) fn is_leap(year: i64) -> bool {

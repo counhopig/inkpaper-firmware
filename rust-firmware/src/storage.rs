@@ -7,6 +7,7 @@ const KEY_WIFI_PASS: &str = "wifi_pass";
 const KEY_SERVER_URL: &str = "server_url";
 const KEY_AUTH_TOKEN: &str = "auth_token";
 const KEY_SYNC_ETAG: &str = "sync_etag";
+const KEY_TIMEZONE_OFFSET: &str = "timezone_min";
 
 /// Maximum length of the NVS strings used for Wi-Fi credentials.
 /// ESP32-S3 NVS limits a single string item to ~4000 bytes; 64 chars is
@@ -142,5 +143,28 @@ impl PersistedCounters {
             .remove(KEY_SYNC_ETAG)
             .map(|_| ())
             .map_err(|e| anyhow!("NVS remove({KEY_SYNC_ETAG}) failed: {e}"))
+    }
+
+    pub fn timezone_offset_minutes(&self) -> Result<i16> {
+        let mut buf = [0u8; 8];
+        let value = self
+            .nvs
+            .get_str(KEY_TIMEZONE_OFFSET, &mut buf)
+            .map_err(|e| anyhow!("NVS get_str({KEY_TIMEZONE_OFFSET}) failed: {e}"))?
+            .unwrap_or("0");
+        value
+            .parse::<i16>()
+            .map_err(|e| anyhow!("invalid stored timezone offset '{value}': {e}"))
+    }
+
+    pub fn save_timezone_offset_minutes(&self, offset: i16) -> Result<()> {
+        if !(-720..=840).contains(&offset) {
+            return Err(anyhow!(
+                "timezone offset must be between -720 and 840 minutes"
+            ));
+        }
+        self.nvs
+            .set_str(KEY_TIMEZONE_OFFSET, &offset.to_string())
+            .map_err(|e| anyhow!("NVS set_str({KEY_TIMEZONE_OFFSET}) failed: {e}"))
     }
 }

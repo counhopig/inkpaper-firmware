@@ -90,6 +90,25 @@ Query the device's current configuration state.
 
 ---
 
+#### `{"cmd":"clear_alarms"}`
+
+Delete every locally stored alarm and disarm the PCF8563 hardware alarm slot.
+Wi-Fi credentials, server configuration, and todos are preserved.
+
+**Reply:** `Ok` on success, or `Error { message }` on failure.
+
+---
+
+#### `{"cmd":"set_timezone","offset_minutes":480}`
+
+Persist a fixed local UTC offset and immediately shift the hardware RTC by the
+difference from the previous offset. Valid range: -720 (UTC-12:00) through 840
+(UTC+14:00). NTP synchronization applies the stored offset before writing RTC.
+
+**Reply:** `Ok` on success, or `Error { message }` on failure.
+
+---
+
 ### Replies
 
 Replies are sent as JSON objects, one per line. Each reply has a `status` field
@@ -260,8 +279,8 @@ command execution, so a hung sync will eventually reboot the device.
 
 ## Limitations (Current Implementation)
 
-- Only four commands are implemented: `set_wifi`, `set_server`, `sync_now`,
-  `get_status`.
+- Six commands are implemented: `set_wifi`, `set_server`, `sync_now`,
+  `get_status`, `clear_alarms`, and `set_timezone`.
 - `wifi_connected` flag in `get_status` always returns `false` (live Wi-Fi state
   checking is not yet wired in).
 - No rate limiting or command queueing; commands are dispatched as they arrive.
