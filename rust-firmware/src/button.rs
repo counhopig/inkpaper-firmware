@@ -18,6 +18,7 @@ pub struct Button {
     candidate: bool,
     samples: u32,
     held_polls: u32,
+    long_pressed: bool,
 }
 
 impl Button {
@@ -30,6 +31,7 @@ impl Button {
             candidate: initial,
             samples: DEBOUNCE_SAMPLES,
             held_polls: 0,
+            long_pressed: false,
         })
     }
 
@@ -42,15 +44,20 @@ impl Button {
                 self.samples = DEBOUNCE_SAMPLES;
                 if self.debounced != self.candidate {
                     self.debounced = self.candidate;
-                    self.held_polls = 0;
-                    event = Some(if self.debounced {
-                        ButtonEvent::Pressed
+                    if self.debounced {
+                        self.held_polls = 0;
+                        self.long_pressed = false;
+                    } else if self.long_pressed {
+                        event = Some(ButtonEvent::Released);
                     } else {
-                        ButtonEvent::Released
-                    });
+                        // Emit a short press on release. Otherwise every
+                        // long press would trigger the short action first.
+                        event = Some(ButtonEvent::Pressed);
+                    }
                 } else if self.debounced {
                     self.held_polls += 1;
                     if self.held_polls == LONG_PRESS_POLLS {
+                        self.long_pressed = true;
                         event = Some(ButtonEvent::LongPressed);
                     }
                 }
