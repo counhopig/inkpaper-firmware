@@ -1,6 +1,5 @@
 //! 1bpp frame buffer and drawing primitives, independent of the EPD driver.
 
-use crate::font;
 use crate::font8x16;
 
 pub const WIDTH: usize = 400;
@@ -77,38 +76,23 @@ impl Canvas {
         }
     }
 
-    pub fn draw_text(&mut self, x: usize, y: usize, scale: usize, text: &str) {
-        self.draw_text_ink(x, y, scale, text, true);
-    }
-
-    /// Draws text with white ink instead of black - e.g. a label sitting on
-    /// top of a filled-black highlight bar (see [`Canvas::fill_rect`]).
-    /// Not called anywhere yet now that provision.rs uses the proportional
-    /// font's white variant instead - kept for any 5x7 use that comes up.
-    #[allow(dead_code)]
-    pub fn draw_text_white(&mut self, x: usize, y: usize, scale: usize, text: &str) {
-        self.draw_text_ink(x, y, scale, text, false);
-    }
-
-    fn draw_text_ink(&mut self, x: usize, y: usize, scale: usize, text: &str, black: bool) {
-        let mut cursor = x;
-        for character in text.chars() {
-            let glyph = font::glyph(character);
-            for (row, bits) in glyph.iter().enumerate() {
-                for column in 0..font::GLYPH_WIDTH {
-                    if bits & (1 << (font::GLYPH_WIDTH - 1 - column)) != 0 {
-                        self.fill_rect(
-                            cursor + column * scale,
-                            y + row * scale,
-                            scale,
-                            scale,
-                            black,
-                        );
-                    }
-                }
-            }
-            cursor += font::ADVANCE * scale;
+    /// Draws a crisp rectangular outline without filling its interior.
+    pub fn stroke_rect(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        thickness: usize,
+    ) {
+        if width == 0 || height == 0 || thickness == 0 {
+            return;
         }
+        let t = thickness.min(width).min(height);
+        self.fill_rect(x, y, width, t, true);
+        self.fill_rect(x, y + height.saturating_sub(t), width, t, true);
+        self.fill_rect(x, y, t, height, true);
+        self.fill_rect(x + width.saturating_sub(t), y, t, height, true);
     }
 
     /// Draws text with the proportional-width 8x16 font (`font8x16.rs`) -
@@ -118,12 +102,6 @@ impl Canvas {
     /// advance-width math.
     pub fn draw_text_prop(&mut self, x: usize, y: usize, scale: usize, text: &str) -> usize {
         self.draw_text_prop_ink(x, y, scale, text, true)
-    }
-
-    /// White-ink version of [`Canvas::draw_text_prop`] - see
-    /// [`Canvas::draw_text_white`] for when you'd want this.
-    pub fn draw_text_prop_white(&mut self, x: usize, y: usize, scale: usize, text: &str) -> usize {
-        self.draw_text_prop_ink(x, y, scale, text, false)
     }
 
     /// Pixel width `text` would occupy if drawn with [`Canvas::draw_text_prop`]
