@@ -325,7 +325,7 @@ cd ..
 
 硬件冒烟基线、NVS、Wi-Fi/NTP、电池 ADC/充电状态、PCF8563 RTC、低功耗、音频（ES8311）、NFC
 （GT23SC6699）、看门狗、统一画布/字体层、日历/闹钟/待办应用、USB/BLE 控制协议、HTTPS 双向同步——
-均已实现，过程记录见 `docs/calendar-alarm-todo-plan.md`（全部 6 个 Phase）。
+均已实现，模块职责见 `rust-firmware/AGENTS.md`。
 
 剩余：
 
@@ -333,8 +333,7 @@ cd ..
 2. OTA、回滚。
 3. 真机验证：闹钟响铃→dismiss 全流程、BLE 配对端到端（尤其是换到 Tauri/Vue 版 `inkpaper-desktop`
    之后需要重新做一遍——旧的验证是在更早的 Desktop 实现下做的）、Wi-Fi 重连规避重启后的实际体验。
-   详见根 README「尚未完成 / 尚未验证」一节，以及工作区根目录的
-   `INKPAPER_ENGINEERING_HISTORY.md` 第 11 节「尚需持续验证的风险」。
+   详见根 README「尚未完成 / 尚未验证」一节和 `docs/project-status.md`。
 
 每加入一个外设，先做独立测试，再接入主应用。显示、电源和休眠改动的风险最高，应始终保留可恢复的串口路径与原厂备份。
 

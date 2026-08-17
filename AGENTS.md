@@ -24,7 +24,7 @@ inkpaper/
 | GPIO/电源轨/EPD 数据格式 | `docs/note4-hardware.md` | 板级硬件权威来源 |
 | USB/BLE 命令协议 | `docs/control-protocol.md` | 与 inkpaper-desktop 的契约 |
 | HTTP 同步协议 | `docs/sync-api.md` | 与 inkpaper-server 的契约 |
-| Wi-Fi 二次连接崩溃调查 | `docs/calendar-alarm-todo-plan.md` Post-Phase-6 | 绕过方案的完整推理链 |
+| Wi-Fi 二次连接崩溃调查 | `rust-firmware/src/wifi.rs`（`WifiManager` 文档注释） | 绕过方案的完整推理链，代码级摘要见 `rust-firmware/AGENTS.md` |
 | 实机验证状态/跨仓库进度 | `docs/project-status.md` | 含"尚未实机验证"清单 |
 
 ## CODE MAP

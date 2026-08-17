@@ -36,7 +36,7 @@ inkpaper-desktop (PC 工具)          inkpaper-server (后端)
 
 ### 已知问题：Wi-Fi 二次连接崩溃（已绕过，非根本修复）
 
-同一次开机周期内第二次连 Wi-Fi 会稳定崩溃（`Guru Meditation Error`），已确认是 ESP-IDF/esp-idf-svc 生态里已知但官方未修复的问题类别（espressif/esp-idf#7579、#11171，esp-rs/esp-idf-svc#503），不是调用方式的问题——连改成直接调原始 `esp_wifi_connect()` FFI、完全绕开 Rust 封装层也会在同一地址崩溃。当前用"检测到已经用过 Wi-Fi 就先干净重启一次（走已验证的深睡+定时唤醒路径，不用 `esp_restart()`，它也会踩同一个坑），重启后再重试"来规避。完整调查记录见 [`docs/calendar-alarm-todo-plan.md`](docs/calendar-alarm-todo-plan.md) 的 "Post-Phase-6" 一节。
+同一次开机周期内第二次连 Wi-Fi 会稳定崩溃（`Guru Meditation Error`），已确认是 ESP-IDF/esp-idf-svc 生态里已知但官方未修复的问题类别（espressif/esp-idf#7579、#11171，esp-rs/esp-idf-svc#503），不是调用方式的问题——连改成直接调原始 `esp_wifi_connect()` FFI、完全绕开 Rust 封装层也会在同一地址崩溃。当前用"检测到已经用过 Wi-Fi 就先干净重启一次（走已验证的深睡+定时唤醒路径，不用 `esp_restart()`，它也会踩同一个坑），重启后再重试"来规避。完整推理链见 `rust-firmware/src/wifi.rs` 的 `WifiManager` 文档注释；代码级红线摘要见 [`rust-firmware/AGENTS.md`](rust-firmware/AGENTS.md)。
 
 ### 尚未完成 / 尚未验证
 
@@ -44,10 +44,10 @@ inkpaper-desktop (PC 工具)          inkpaper-server (后端)
 
 - 文件系统、OTA 仍未实现。
 - **真机上完整的"闹钟响铃→ENTER 解除"流程还没有人工确认过**（硬件闹钟寄存器的读写逻辑已验证正确，但没有真正听到/看到响铃解除的全过程）。
-- **BLE 配对已经真机验证过一次**：固件 GATT 服务端和 `inkpaper-desktop` 的 `btleplug` 客户端实际连上过，收到过写入+notify 回复（`BLE connected` / `OK`）——但这是在更早的 egui 版 Desktop 下测的。**换成现在的 Tauri/Vue 版 Desktop 之后这条验证需要重新做一遍**（USB 那边同理）。完整调试记录见工作区根目录的 `INKPAPER_ENGINEERING_HISTORY.md` 第 4.3/11 节。
+- **BLE 配对已经真机验证过一次**：固件 GATT 服务端和 `inkpaper-desktop` 的 `btleplug` 客户端实际连上过，收到过写入+notify 回复（`BLE connected` / `OK`）——但这是在更早的 egui 版 Desktop 下测的。**换成现在的 Tauri/Vue 版 Desktop 之后这条验证需要重新做一遍**（USB 那边同理）。
 - Wi-Fi 二次连接的"重启后重试"体验需要用真实的 `espflash monitor` 会话确认（连续触发两次 `sync_now`，确认第一次干净重启、第二次真正连上并同步成功）。
 
-完整的环境、安全事项、构建、烧录、调试与故障排查见 **[docs/development-guide.md](docs/development-guide.md)**；日历/闹钟/待办功能的完整开发过程和踩坑记录见 **[docs/calendar-alarm-todo-plan.md](docs/calendar-alarm-todo-plan.md)**；跨三个仓库的整体进度快照见 **[docs/project-status.md](docs/project-status.md)**；更详细的三仓库联合工作纪要（设计决策、真机调试记录、部署方式）见工作区根目录的 **[`../INKPAPER_ENGINEERING_HISTORY.md`](../INKPAPER_ENGINEERING_HISTORY.md)**。
+完整的环境、安全事项、构建、烧录、调试与故障排查见 **[docs/development-guide.md](docs/development-guide.md)**；跨三个仓库的整体进度快照见 **[docs/project-status.md](docs/project-status.md)**。
 
 ## 仓库结构
 
@@ -56,7 +56,6 @@ inkpaper/
 ├── docs/
 │   ├── development-guide.md       完整开发指南（必读）
 │   ├── note4-hardware.md          板级 GPIO / 电源轨 / EPD 格式
-│   ├── calendar-alarm-todo-plan.md 日历/闹钟/待办功能路线图 + Wi-Fi 崩溃调查记录
 │   ├── control-protocol.md        USB/BLE 命令协议规格（给 inkpaper-desktop 对接）
 │   ├── sync-api.md                HTTP 同步协议规格（给 inkpaper-server 对接）
 │   └── project-status.md          跨三仓库的进度快照
@@ -172,7 +171,7 @@ espflash monitor --port /dev/ttyACM0
 ## 开发路线
 
 1. ~~硬件冒烟基线、画布/字体层、Wi-Fi/NVS/配网、电池/RTC/低功耗、音频/NFC、看门狗~~ 完成（详见 `docs/development-guide.md`）。
-2. ~~日历 / 离线闹钟 / 待办~~ 完成（`docs/calendar-alarm-todo-plan.md` 全部 6 个 Phase）。
+2. ~~日历 / 离线闹钟 / 待办~~ 完成。
 3. ~~USB/BLE 配置协议~~ 完成（`control.rs` / `usb_console.rs` / `ble_control.rs`）。
 4. ~~HTTPS 内容同步~~ 完成（`sync.rs`，契约见 `docs/sync-api.md`）。
 5. ~~PC 工具（`inkpaper-desktop`）、服务器（`inkpaper-server`）~~ 首版完成，见各自仓库；三个仓库现在都已提交 git 并推送到各自的 `origin/main`。

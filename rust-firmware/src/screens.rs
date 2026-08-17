@@ -483,8 +483,7 @@ fn activate_todo_row(store: &TodoStore, selected: usize) {
 
 /// Two-stage hour/minute stepper for a new daily alarm - editing repeat
 /// mode or a specific one-shot date is left to the PC tool/server sync
-/// path (`docs/calendar-alarm-todo-plan.md` Phase 3), not this on-device
-/// screen.
+/// path, not this on-device screen.
 fn add_alarm_screen(board: &mut Note4Board, existing: &[StoredAlarm]) -> Option<StoredAlarm> {
     let hour = pick_number(board, "NEW ALARM - HOUR", 0, 23)?;
     let minute = pick_number(board, "NEW ALARM - MINUTE", 0, 59)?;

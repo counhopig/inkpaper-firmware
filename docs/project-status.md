@@ -5,13 +5,6 @@ system, as of 2026-08-17. Update this when the shape of any repo changes
 significantly - it's meant to answer "what's built, what's tested, what's
 left" without having to reconstruct it from commit history.
 
-> For the full narrative (design decisions, bugs found and fixed, real
-> debugging sessions, deployment steps) see
-> `../../INKPAPER_ENGINEERING_HISTORY.md` at the workspace root (outside all
-> three git repos - not yet under version control). This file is the short
-> version; that one is the long version. Where the two disagree, trust the
-> engineering history doc and update this file to match.
-
 ## System overview
 
 Three repos, one device, all committed and pushed to their own `origin/main`
@@ -77,12 +70,10 @@ A real calendar / alarm clock / todo device, not a hardware smoke test:
   FFI directly, still crashes). Worked around by tracking `used()` and
   restarting via `power::restart_via_deep_sleep` (never `esp_restart()`,
   which hits the same crash class) before any second connect attempt, so
-  the crashing code path is never actually exercised. Full investigation:
-  `docs/calendar-alarm-todo-plan.md`'s "Post-Phase-6" section and
-  `INKPAPER_ENGINEERING_HISTORY.md` §5.2.
+  the crashing code path is never actually exercised. Full reasoning lives
+  in `rust-firmware/src/wifi.rs`'s `WifiManager` doc comment.
 
-**Tested on real hardware** (see `INKPAPER_ENGINEERING_HISTORY.md` §10 for
-the full list): boot sequence, Wi-Fi/NTP sync, home screen rendering, USB
+**Tested on real hardware**: boot sequence, Wi-Fi/NTP sync, home screen rendering, USB
 command/reply round-trip (including `set_wifi`/`set_server` writes), a real
 BLE connection with a working write + notify round-trip (`BLE connected` /
 `OK` reply), an end-to-end sync (PC tool -> server registration -> pushed
@@ -108,9 +99,8 @@ README for Tauri + Vue architecture`), pushed to `origin/main`.
 
 **Rewritten from egui/eframe to Tauri 2 + Vue 3 + TypeScript + Pinia**
 (`807be6e` onward) - the egui UI worked but layout/visual polish was slow to
-iterate on, so the stack was swapped rather than continuing to patch it (see
-`INKPAPER_ENGINEERING_HISTORY.md` §7-8 for the full reasoning and the
-egui-era bugs that motivated it). Four pages: Overview, Device (USB/BLE,
+iterate on, so the stack was swapped rather than continuing to patch it.
+Four pages: Overview, Device (USB/BLE,
 Wi-Fi/server/timezone config, Sync Now), Content (device registration,
 alarm/todo management against `inkpaper-server`'s admin API), Logs
 (real-time diagnostics, mirrored to a platform log directory, secrets
@@ -167,8 +157,8 @@ both desktop and phone widths.
 
 ## Known issues / open items
 
-Consolidated from `INKPAPER_ENGINEERING_HISTORY.md` §11 - none of these are
-safe to treat as done just because the relevant code compiles:
+None of these are safe to treat as done just because the relevant code
+compiles:
 
 1. **Re-verify USB and BLE real-device flows under the current Tauri/Vue
    Desktop.** Both were verified end-to-end, but under the previous egui
@@ -198,7 +188,6 @@ safe to treat as done just because the relevant code compiles:
 - File system + OTA/rollback design, once the above real-hardware gaps are
   closed (shipping OTA on top of unverified recovery paths is backwards).
 - If BLE or Wi-Fi testing surfaces new issues, expect the same depth of
-  investigation as the existing sagas in
-  `docs/calendar-alarm-todo-plan.md`'s Post-Phase-6 section and
-  `INKPAPER_ENGINEERING_HISTORY.md` §5 - these are the least forgiving
-  subsystems in the whole stack.
+  investigation as the Wi-Fi reconnect-crash workaround took (see
+  `rust-firmware/src/wifi.rs`) - these are the least forgiving subsystems in
+  the whole stack.
