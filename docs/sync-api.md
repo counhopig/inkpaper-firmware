@@ -102,17 +102,16 @@ Each todo object:
 
 #### ETag Header (optional)
 
-If the response includes an **ETag** header, the firmware caches its value and
-includes it in the `If-None-Match` header on the next sync request. This allows
-the server to return HTTP 304 if the content has not changed, saving bandwidth.
+The server includes an **ETag** header on the response, and the firmware
+caches its value in NVS. Current (POST-based) firmware does **not** send it
+back as `If-None-Match` - every sync uploads state and gets a full 200
+response back, so there is no conditional-request round trip on this path.
+The cached value is kept mainly for diagnostics and for compatibility with
+the legacy GET flow described below.
 
-The ETag value is opaque to the firmware; it is cached and passed back
-verbatim (quotes included, if the server sent them) in the next request's
-`If-None-Match` header.
-
-`GET /api/sync` and conditional HTTP 304 remain available for older firmware,
-but current firmware uses `POST` so local completion/enabled changes are never
-discarded before upload.
+`GET /api/sync` and conditional HTTP 304 remain available for older firmware
+that still sends `If-None-Match`, but current firmware always uses `POST` so
+local completion/enabled changes are never discarded before upload.
 
 ### Other Status Codes
 

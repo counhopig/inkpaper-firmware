@@ -1,6 +1,6 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-08-16 · **Commit:** 9ef9ade · **Branch:** main
+**Generated:** 2026-08-16 · **Updated:** 2026-08-17 · **Commit:** f41555b · **Branch:** main
 
 ## OVERVIEW
 ZECTRIX NOTE4 黑白屏版（ESP32-S3-WROOM-1 N16R8，4.2" 400×300 SSD2683 EPD）自研固件仓库。Rust 单 crate（`rust-firmware/`），ESP-IDF 5.5.5 + `esp` Xtensa 工具链，实现日历/离线闹钟/待办 + HTTPS 同步 + USB/BLE 配置通道。三仓库系统之一（`../inkpaper-desktop` PC 工具、`../inkpaper-server` 后端，均为独立仓库）。设计原则：设备不创作内容——配置通道只下发 Wi-Fi 凭据/服务器地址+token，内容以结构化 JSON 拉取，闹钟离线可响。
@@ -9,7 +9,7 @@ ZECTRIX NOTE4 黑白屏版（ESP32-S3-WROOM-1 N16R8，4.2" 400×300 SSD2683 EPD�
 ```
 inkpaper/
 ├── docs/            # 全部文档：开发指南(必读)、硬件规格、两份跨仓库协议契约、路线图/调查记录
-├── rust-firmware/   # 唯一产品代码：inkpaper-note4 crate（23 个平铺 src 模块 ~4.3k LOC + C++ EPD 组件）
+├── rust-firmware/   # 唯一产品代码：inkpaper-note4 crate（21 个平铺 src 模块 ~4.3k LOC + C++ EPD 组件）
 ├── scripts/         # 构建/烧录/配网脚本（.sh=Linux，.ps1=Windows 孪生，+1 Python 配网）
 ├── vendor/          # vendored esp-idf-hal 0.46.2 + sdmmc patch（第三方只读，见 UNIQUE STYLES）
 └── backups/         # 原厂 16MB flash 备份（gitignored，设备唯一且含凭据——永不提交）
@@ -32,7 +32,7 @@ inkpaper/
 
 | Symbol | Type | Location | Role |
 |--------|------|----------|------|
-| `main()` | fn | `rust-firmware/src/main.rs:85` | 唯一入口：boot + 20ms 轮询主循环，wire 全部 22 个模块 |
+| `main()` | fn | `rust-firmware/src/main.rs:85` | 唯一入口：boot + 20ms 轮询主循环，wire 全部 20 个 `mod` 模块 |
 | `Note4Board::take()` | fn | `src/board.rs` | 硬件集中装配：RTC/EPD/按键/LED/音频/NFC/ADC，共享 I2C0 |
 | `WifiManager` | struct | `src/wifi.rs` | Wi-Fi 单例——全仓库最关键约束的载体（见 ANTI-PATTERNS #3） |
 | `control::dispatch` | fn | `src/control.rs` | USB/BLE 共用命令分发，仅主循环上下文调用 |

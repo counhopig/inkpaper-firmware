@@ -1,7 +1,7 @@
 # rust-firmware — inkpaper-note4 crate
 
 ## OVERVIEW
-全部产品代码所在的单 crate：ESP32-S3 固件，23 个平铺 src 模块（无子目录）+ 1 个 C++ EPD FFI 组件。入口 `src/main.rs:85`（`[[bin]] inkpaper-note4`）。
+全部产品代码所在的单 crate：ESP32-S3 固件，21 个平铺 src 模块（无子目录，含 `main.rs`）+ 1 个 C++ EPD FFI 组件。入口 `src/main.rs:85`（`[[bin]] inkpaper-note4`）。
 
 ## MODULE MAP (src/)
 | 分组 | 模块 | 职责 |
@@ -11,8 +11,8 @@
 | 硬件 | `power.rs` | 深睡/唤醒原因/GPIO17 RTC hold；`enter_deep_sleep_with_wakeups` 是唯一安全重启路径 |
 | 硬件 | `rtc.rs` | PCF8563 驱动 + 唯一硬件闹钟寄存器（L165-170） |
 | 硬件 | `button.rs` / `watchdog.rs` / `audio.rs` / `nfc.rs` | 消抖+短按/1s 长按；任务 WDT；ES8311；GT23SC6699 |
-| 渲染 | `canvas.rs` / `font.rs` / `font8x16.rs` / `display.rs` | 1bpp 帧缓冲；5×7 定宽；比例宽字模；EPD FFI 封装 + 主界面布局 |
-| UI | `ui.rs` / `screens.rs` / `provision.rs` | 3 按键通用组件（列表选择、字符轮选输入）；日历/闹钟/待办菜单；Wi-Fi 配网向导 |
+| 渲染 | `canvas.rs` / `font8x16.rs` / `display.rs` | 1bpp 帧缓冲 + stroke_rect 描边；比例宽字模；EPD FFI 封装 + 主界面布局 |
+| UI | `ui.rs` / `screens.rs` | 3 按键通用组件（列表选择、翻页、导航抽屉）；导航抽屉/日历/闹钟/待办/设置菜单（长按 UP/DOWN 进入，无设备端文本输入） |
 | 服务 | `alarms.rs` / `todos.rs` / `storage.rs` | NVS store；闹钟负责挑最近一个武装 PCF8563 |
 | 协议 | `control.rs` / `usb_console.rs` / `ble_control.rs` / `sync.rs` / `wifi.rs` | `>>IP `/`<<IP ` 命令协议（USB/BLE 共用 `control::dispatch`）；HTTPS 同步；WifiManager |
 
@@ -27,7 +27,7 @@
 
 ## ANTI-PATTERNS (code-enforced)
 根 AGENTS.md 的红线在本 crate 的具体执行点：
-- **Wi-Fi 三铁律**（`wifi.rs`）：① 每 boot 只允许一次成功 `connect()`——非首次调用方必须先查 `used()`，true 则走 `restart_for_fresh_wifi_session()`（守卫实例：`sync.rs:171-181`、`provision.rs:102-113`、`control.rs:105-112`）；② **永不调 `esp_wifi_stop()`**（L205-218，stop→start 即崩溃触发点，`start()` 每进程一次）；③ 重启只用深睡路径，**不用 `esp_restart()`**（L253-281）。Wi-Fi 配置必须 `WIFI_STORAGE_RAM`（L108-113）。重启后 sync 不自动续跑，由调用方重试。
+- **Wi-Fi 三铁律**（`wifi.rs`）：① 每 boot 只允许一次成功 `connect()`——非首次调用方必须先查 `used()`，true 则走 `restart_for_fresh_wifi_session()`（守卫实例：`sync.rs:217`、`control.rs:110`）；② **永不调 `esp_wifi_stop()`**（stop→start 即崩溃触发点，`start()` 每进程一次）；③ 重启只用深睡路径（`power::restart_via_deep_sleep`，纯定时唤醒，无 ext1/RTC 闹钟），**不用 `esp_restart()`**。Wi-Fi 配置必须 `WIFI_STORAGE_RAM`。重启后 sync 不自动续跑，由调用方重试；设备端已无 Wi-Fi 配网向导，`SetWifi` 只能来自 USB/BLE。
 - **BLE**（`ble_control.rs`）：NimBLE 回调线程**禁止碰 `Note4Board`**，只 push channel，dispatch 仅在主循环（L80-83）；`deinit_full()` 后每次 `start()` 必须显式 `BLEDevice::init()`（L55-58）。BLE 与 Wi-Fi 共享射频，永不同时开——BLE 只在配对页存活。
 - **RTC 闹钟**：只有一个硬件槽，多闹钟时必须总是写时间最近的那个（`alarms::next_due`，`rtc.rs:165-170`）；boot 时 `clear_alarm()` 清残留（`board.rs:92-94`）。
 - **上电时序**：GPIO42(AVDD) 拉高必须先于 I2C0 init（`board.rs:69-70, 87`）；唤醒后先 `release_power_latch_hold()` 再在 GPIO17 上建 PinDriver（`power.rs:33-36` → `board.rs:61`）。

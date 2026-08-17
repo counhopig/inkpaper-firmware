@@ -18,9 +18,15 @@
 - 官方 SSD2683 EPD 驱动可完成 400×300 黑白全刷与局刷，仅刷新数字区域在实机验证；长按清残影也已验证。
 - 原厂 16 MiB Flash 已完整备份到 `backups/note4-factory-20260815-213553.bin`（SHA-256 `dbe8b1504710d6b76dee0136505bc952013023db29fdcd1a3d3bfb4c6d9d182a`），可用于恢复本机。
 
-### 当前固件是开发起点，不是完整产品
+### 当前实现状态
 
-未完成模块：Wi-Fi、音频（ES8311）、RTC（PCF8563）、NFC（GT23SC6699）、电池管理与 ADC、文件系统、休眠（deep sleep + RTC GPIO hold）、OTA。
+固件已经是一台可用的日历/闹钟/待办设备，不再是本节最初写下时的按键计数器 demo：Wi-Fi STA+NTP、
+音频（ES8311）、RTC（PCF8563，含硬件闹钟寄存器）、NFC（GT23SC6699）、电池管理与 ADC、深度睡眠
+（GPIO17 RTC hold）、USB/BLE 控制协议、HTTPS 双向同步均已实现并在实机验证过基础路径。当前模块
+职责表见 `rust-firmware/AGENTS.md`（比第 4 节的早期架构图更新、更完整）。
+
+尚未做的：文件系统、OTA、回滚。尚未在实机上完整人工验证的：闹钟响铃→ENTER 解除全流程、BLE 配对
+端到端连通性——详见根 README「尚未完成 / 尚未验证」一节。
 
 ## 2. 安全事项（不可妥协）
 
@@ -59,11 +65,11 @@ GPIO 26-37 被 Octal PSRAM 占用，不能作为普通 GPIO 使用。
 应用主体使用 Rust，底层建立在 ESP-IDF（5.5.5）上：
 
 ```text
-Rust application (main.rs)
+Rust application (main.rs, 20 个 mod 平铺模块 — 见 rust-firmware/AGENTS.md)
   |
-  +-- Board ownership and buttons (board.rs / esp-idf-hal)
+  +-- Board ownership, buttons, RTC, audio, NFC, ADC (board.rs / esp-idf-hal)
   |
-  +-- 1bpp framebuffer and 5x7 glyph renderer (display.rs)
+  +-- 1bpp framebuffer and proportional glyph renderer (canvas.rs / font8x16.rs / display.rs)
          |
          +-- generated C bindings (esp-idf-sys bindgen)
                  |
@@ -72,12 +78,12 @@ Rust application (main.rs)
                          +-- ESP-IDF GPIO/SPI drivers + SSD2683 waveform
 ```
 
+完整的模块职责表（21 个 src 文件，含 UI/闹钟/待办/同步/USB/BLE 等应用层模块）见
+[`rust-firmware/AGENTS.md`](../rust-firmware/AGENTS.md) 的 MODULE MAP——本节以下只保留
+EPD FFI 组件本身的构建细节，不重复维护完整模块列表。
+
 | 文件 | 作用 |
 | --- | --- |
-| `rust-firmware/src/main.rs` | 启动、按键事件处理、计数、局刷/全刷循环 |
-| `rust-firmware/src/button.rs` | 按键消抖（20 ms / 4 次确认）、短按与 1 s 长按事件 |
-| `rust-firmware/src/board.rs` | 电源锁存、LED、按键和充电状态 GPIO |
-| `rust-firmware/src/display.rs` | 1bpp 画布、5×7 字模、局刷区域打包、官方 EPD Rust 封装 |
 | `rust-firmware/components/zectrix_epd/` | 官方 NOTE4 EPD C++ 驱动 + SSD2683 波形表 |
 | `rust-firmware/Cargo.toml` | Rust 依赖 + esp-idf-sys extra_components 配置（生成 `zectrix_epd` FFI） |
 | `rust-firmware/sdkconfig.defaults` | ESP32-S3、DIO、PSRAM、串口等配置 |
@@ -241,17 +247,18 @@ zectrix_epd_power_off
 
 ## 10. 当前实现要点（源码索引）
 
-- `main.rs` 主循环以 `POLL_INTERVAL_MS = 20`（ms）轮询三按键；按键事件用 `Option<ButtonEvent>` 携带。短按计数；长按标记 `full_refresh`，下一轮统一处理（避免一次按键内既刷局又刷全）。
-- `display.rs::render(&ButtonCounts)` 是“每次刷新前重画整张 buffer”的简单模式——避免维护局部脏区的同时也限制了性能边界；后续加入 UI 层时应评估帧缓冲双缓冲与局部脏区合并。
-- `display.rs::pack_rect(Rect)` 把矩形区域按 `(row_bytes, height)` 重打包为 MSB-first；只要源 framebuffer 与目标 rect 的 MSB-first 约定一致即可，与 5×7 字模的位置无关。
-- `display.rs::glyph` 是 5×7 字模硬编码表，大写 A-Z、0-9 加小写字母映射为大写；其他字符返回全零。
-- `board.rs::take()` 集中初始化：电源锁存拉高、LED 拉高（熄灭）、AVDD 拉低（关闭）、按键走 `Pull::Up`、`charging` 走 `Pull::Up`、`charge_done` 浮空输入。
+> 这一节只收不适合放进 `rust-firmware/AGENTS.md` 模块表的**低层实现细节**（ADC 读取策略、
+> I2C 上电时序、RTC 寄存器布局等）；应用层行为（菜单结构、命令协议、同步流程）以
+> 根 README 和 `rust-firmware/AGENTS.md` 为准，本节不重复维护。
+
+- `main.rs` 主循环以 `POLL_INTERVAL_MS = 20`（ms）轮询三按键；按键事件用 `Option<ButtonEvent>` 携带。短按在 Home 上无动作，长按 UP/DOWN 打开导航抽屉（`screens::open_navigation`），需要重绘时把对应 `Rect` 收进 `dirty` 列表，一轮结束后统一发起局刷/全刷。
+- `board.rs::take()` 集中初始化：电源锁存拉高、AVDD 拉低（关闭，待 I2C0 初始化前再拉高）、按键走 `Pull::Up`、`charging` 走 `Pull::Up`、`charge_done` 浮空输入。设备端已不驱动状态 LED（`set_led`/`_led` 字段在 UI 重写时一并移除）。
 
 ### 存储与电源状态
 
-- `storage.rs` 封装默认 NVS 分区（`partitions.csv` 中已声明 `nvs` 24 KiB 分区）；命名空间 `inkpaper`，三个键 `counter_enter / counter_up / counter_down`，类型均为 `u32`。`PersistedCounters::open()` 会调用 `EspDefaultNvsPartition::take()`，自动初始化 NVS flash；`load()` 缺失键视为 0，`save()` 内部走 `set_u32` 并由 esp-idf-svc 自动 `commit`。
+- `storage.rs` 封装默认 NVS 分区（`partitions.csv` 中已声明 `nvs` 24 KiB 分区），命名空间 `inkpaper`。`PersistedCounters`（历史上从按键计数持久化演变而来，名字沿用了下来）现在存 `wifi_ssid` / `wifi_pass` / `server_url` / `auth_token` / `sync_etag` / `timezone_min` 六个键，`open()` 调用 `EspDefaultNvsPartition::take()` 自动初始化 NVS flash。`alarms.rs`/`todos.rs` 的 `AlarmStore`/`TodoStore` 各自持有同一 NVS 分区的另外的命名空间，存整份 JSON blob 而非分字段键。
 - `board.rs::battery_millivolts()` 走 ESP-IDF 5.x 的 ADC oneshot API：`AdcDriver::new(peripherals.adc1)` 持久化持有 ADC 单元，每次读电时 `Peripherals::steal()` 取出 `GPIO4`（ESP32-S3 上即 ADC1 CH3），临时构造 `AdcChannelDriver::new(&self.adc, gpio4, &BATTERY_ADC_CHANNEL_CONFIG)`。因为 `Note4Board` 全部字段都是 `'static`，把 channel 直接放进 board 会触发借用冲突，所以采用「每次重建 channel」的策略；返回值为 ESP-IDF mV × 2（板载 1:2 分压），并被 `u16::MAX` 钳制。
-- `main.rs` 启动时调用 `PersistedCounters::load()` 读取历史计数；按键后把 `idle_since_save` 清零，连续 50 轮（约 1 s）无新按键后写入 NVS。间隔限制避免频繁触碰 NVS flash。同一计数器驱动 `report_power_state()`，每 50 轮打印一次 `Power state: charging=… charge_done=… vbat_mV=…`，便于串口观察。
+- `main.rs` 主循环每 `STATUS_REPORT_INTERVAL_POLLS`（50 轮 ≈ 1 s）调用一次 `report_power_state()`，打印 `Power state: charging=… charge_done=… vbat_mV=…`；每 `CLOCK_POLL_INTERVAL_POLLS`（60 轮 ≈ 1.2 s）重读一次 PCF8563，秒/分/时变化才标记 `CLOCK_RECT` 为脏区触发局刷，避免每轮都重绘。
 - 充电状态引脚极性：`CHRG_L = GPIO2`，低电平表示正在充电；`STDBY_H = GPIO1`，高电平表示充满。两条信号都在 `board.charging_state()` 中返回，1 s 周期打印一次。
 - `sdkconfig.defaults` 已显式启用 `CONFIG_NVS_ENABLED=y` 与 `CONFIG_ADC_ONESHOT_ENABLED=y`。后续若启用 curve-fitting ADC 校准（ESP32-S3 上以 eFuse 三点拟合），需要再追加 `CONFIG_ADC_CAL_EFUSE_TP_FIT_SUPPORTED=y` 并把 `AdcChannelConfig { calibration: Calibration::Curve, .. }` 写进 `BATTERY_ADC_CHANNEL_CONFIG`。
 
@@ -261,7 +268,7 @@ zectrix_epd_power_off
 - 设备地址：`0x51`（7-bit），`rtc::Pcf8563::probe()` 在板级初始化阶段发一字节读 0x00 作连通性测试；失败会让 `Note4Board::take()` 返回错误。
 - 寄存器布局：BCD，秒/分/时/日/星期/月/年位于 `0x02..=0x08`；`0x00` 的 bit7 是 `voltage_low`，VL=1 表示 RTC 备用电池掉电或首次上电，时间不再可信。
 - `main.rs` 启动顺序：`read_time()` → 打印；`voltage_low` 时调用 `from_unix(BUILD_EPOCH_SECS)` 重新写入（`BUILD_EPOCH_SECS` 由 `build.rs` 用 `SystemTime::now()` 注入到 `cargo:rustc-env`，构建时刷新）。
-- 闹钟与方波：`Pcf8563::clear_alarm()` 在 `board.rs` 启动后清空 `0x09..=0x0C` 闹钟寄存器与 `0x01` 的 AIE 位，避免残留报警打断后续 deep-sleep 唤醒。后续启用 alarm 唤醒时再调用 `set_alarm`。
+- 闹钟与方波：`Pcf8563::clear_alarm()` 在 `board.rs` 启动后清空 `0x09..=0x0C` 闹钟寄存器与 `0x01` 的 AIE 位，避免残留报警打断后续 deep-sleep 唤醒；随后 `alarms::program_hardware_alarm()` 立即把已存闹钟里最近的一个重新写进同一组寄存器（芯片只有一路硬件闹钟槽，多闹钟场景由固件自己挑最近的）。
 ## 11. 常见故障
 
 ### 固件烧录成功但不断复位
@@ -295,6 +302,13 @@ cd ..
 
 关闭仍在运行的 Cargo、rustc、IDE 检查任务或旧构建进程，然后重试。
 
+### Wi-Fi 连接失败（`reason=201` / `NO_AP_FOUND`），但手动 scan 能看到目标 AP
+
+`EspWifi::connect()` 内部触发的是带 SSID 过滤的定向扫描，逐字节区分大小写；手动 `scan()`
+不带过滤器，会返回所有 AP。两者结果不一致时，先确认 NVS 里存的 SSID 大小写是否和路由器
+实际广播的完全一致（`gen-nvs-wifi.py` 供网时手敲的 SSID 容易在大小写上和 AP 广播的不一样，
+如 `XiaoMi_ED4E` vs 路由器实际的 `Xiaomi_ED4E`）——scan 打印出来的 SSID 才是权威来源。
+
 ### 无法打开串口
 
 确认用户已加入 `uucp` 组（`sudo usermod -aG uucp $USER` 后重新登录），关闭其他 monitor / 串口工具，重新插拔 USB，用 `ls /dev/ttyACM*` 检查设备节点。必要时按住 ENTER/BOOT，再触发复位进入下载模式。
@@ -307,15 +321,20 @@ cd ..
 
 这是正常的。电子纸断电保持画面；只有执行有效刷新波形才会改变内容。
 
-## 12. 推荐开发顺序
+## 12. 开发路线：已完成 vs 剩余
 
-1. 把当前 Hello World + 三按键固件保留为硬件冒烟测试基线。
-2. NVS 设置、Wi-Fi 配网和时间同步（按键计数 NVS 持久化已在 `src/storage.rs` 实现，可作为参考模板）。
-3. 电池 ADC、充电状态、PCF8563 RTC 与低功耗策略（`battery_millivolts()` + `report_power_state()` 已在 `main.rs` 周期打印；进一步可在 GPIO17 失锁前用 RTC GPIO hold 维持主电源）。
-4. 引入成熟图形库（`embedded-graphics` 已是 `esp-idf-hal` 支持的可选 feature）或建立统一画布、字体和布局层。
-5. 音频（I2S + ES8311）、NFC（GT23SC6699）。
-6. 内容协议、内容缓存、文件系统。
-7. OTA、回滚、看门狗和故障恢复。
+硬件冒烟基线、NVS、Wi-Fi/NTP、电池 ADC/充电状态、PCF8563 RTC、低功耗、音频（ES8311）、NFC
+（GT23SC6699）、看门狗、统一画布/字体层、日历/闹钟/待办应用、USB/BLE 控制协议、HTTPS 双向同步——
+均已实现，过程记录见 `docs/calendar-alarm-todo-plan.md`（全部 6 个 Phase）。
+
+剩余：
+
+1. 文件系统、内容缓存策略。
+2. OTA、回滚。
+3. 真机验证：闹钟响铃→dismiss 全流程、BLE 配对端到端（尤其是换到 Tauri/Vue 版 `inkpaper-desktop`
+   之后需要重新做一遍——旧的验证是在更早的 Desktop 实现下做的）、Wi-Fi 重连规避重启后的实际体验。
+   详见根 README「尚未完成 / 尚未验证」一节，以及工作区根目录的
+   `INKPAPER_ENGINEERING_HISTORY.md` 第 11 节「尚需持续验证的风险」。
 
 每加入一个外设，先做独立测试，再接入主应用。显示、电源和休眠改动的风险最高，应始终保留可恢复的串口路径与原厂备份。
 

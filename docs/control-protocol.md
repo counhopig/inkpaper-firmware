@@ -59,16 +59,23 @@ Fetch alarms and todos from the configured server and apply them to local stores
 - (No other fields.)
 
 **Behavior:**
-- Loads server config from storage (URL + token).
-- Checks that system time is available (required for conditional requests).
-- Performs an HTTPS GET request with conditional-request headers (`If-None-Match`
-  ETag, if cached).
-- On HTTP 200, parses the response JSON and applies alarms/todos to local stores,
-  then caches any returned ETag.
-- On HTTP 304, does nothing (server content unchanged).
-- On HTTP error or network failure, returns an error.
+- Loads server config from storage (URL + token). Checks that system time is
+  available (needed to re-arm the RTC alarm after applying synced data).
+- Connects Wi-Fi via the process's shared `WifiManager`, then performs the
+  bidirectional HTTPS POST described in
+  [`sync-api.md`](sync-api.md): uploads the device's local alarm `enabled` /
+  todo `done` flags, and applies the server's merged, authoritative alarm/todo
+  lists from the response body. Text, schedules, additions, and deletions are
+  never uploaded by the device.
+- On HTTP 200, parses the response JSON, saves alarms/todos to local stores,
+  and re-arms the PCF8563 hardware alarm slot. Caches any returned ETag
+  (currently informational only - the POST request does not send
+  `If-None-Match`, so every sync gets a full response).
+- On HTTP error or network failure, returns an error; local data is left
+  unchanged.
+- Disconnects Wi-Fi again once the request completes (success or failure).
 
-**Reply:** `Ok` on success (whether 200 or 304), or `Error { message }` on failure.
+**Reply:** `Ok` on success, or `Error { message }` on failure.
 
 ---
 
@@ -284,17 +291,21 @@ command execution, so a hung sync will eventually reboot the device.
 - `wifi_connected` flag in `get_status` always returns `false` (live Wi-Fi state
   checking is not yet wired in).
 - No rate limiting or command queueing; commands are dispatched as they arrive.
-- **Commands are only polled from the Home screen's main loop.** Any screen
-  reached via the on-device menu (`screens::open_menu` and everything under
-  it - Calendar/Alarms/Todos/Server Setup/Sync Now/Wi-Fi Setup) runs its own
-  nested blocking button-poll loop and does not check for USB commands at
-  all. If the device happens to be sitting in a menu screen (e.g. because
-  someone is using it, or because opening the serial port triggered a
-  spurious ENTER - see next point), commands queue up in the reader
-  thread's channel (capacity 16, then further ones are dropped) but aren't
-  dispatched until the user backs out to Home. A PC tool that needs
-  guaranteed responsiveness should treat "no reply within a few seconds" as
-  "device is probably in a menu," not as a transport failure.
+- **Commands are only polled from the Home screen's main loop.** `UsbConsole`
+  has no dedicated reader thread or queue - the main loop calls
+  `poll_command()` once per 20 ms iteration, which does a non-blocking read
+  of whatever bytes are currently available. Any screen reached via the
+  navigation drawer (`screens::open_navigation` - Calendar/Alarms/Todos/
+  Settings, and everything under Settings: Sync Now/BLE Pairing/Sleep) runs
+  its own nested blocking button-poll loop and never calls `poll_command()`
+  at all. If the device happens to be sitting in one of those screens (e.g.
+  because someone is using it, or because opening the serial port triggered
+  a spurious ENTER - see next point), bytes simply accumulate unread in the
+  USB-Serial-JTAG driver's own buffer (capacity/behavior not verified by
+  this firmware) until the device returns to Home and polling resumes. A PC
+  tool that needs guaranteed responsiveness should treat "no reply within a
+  few seconds" as "device is probably in a menu," not as a transport
+  failure.
 - **Opening the serial port can itself trigger a spurious ENTER press.**
   This board's USB-Serial-JTAG auto-reset circuitry (the same one `espflash`
   uses to enter the bootloader) wires the DTR/RTS control lines to GPIO0 -

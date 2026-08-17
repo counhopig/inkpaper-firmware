@@ -23,15 +23,15 @@ inkpaper-desktop (PC 工具)          inkpaper-server (后端)
 
 `rust-firmware/` 是当前可在实机运行的 Rust 主固件，已经是一台真正能用的日历/闹钟/待办设备，不再是按键计数器 demo：
 
-- GPIO17 主电源软锁存、GPIO3 绿色 LED 心跳、GPIO0/39/18 三按键（短按+1s 长按）、官方 SSD2683 EPD 驱动（全刷/局刷）、16 MB Flash 分区、按键消抖等基础能力（详见下方硬件小节）与此前一致。
-- **主界面**：时钟 + 下一个闹钟时间 + 待办数量摘要；ENTER 短按打开菜单（CALENDAR / ALARMS / TODOS / SERVER SETUP / SYNC NOW / WIFI SETUP / BLE PAIRING）。
+- GPIO17 主电源软锁存、GPIO0/39/18 三按键（短按+1s 长按）、官方 SSD2683 EPD 驱动（全刷/局刷）、16 MB Flash 分区、按键消抖等基础能力（详见下方硬件小节）与此前一致；状态 LED 心跳已在 UI 重写时移除。
+- **主界面**：时钟 + 下一个闹钟时间 + 待办数量摘要；长按 UP/DOWN 打开导航抽屉（HOME / CALENDAR / ALARMS / TODOS / SETTINGS），SETTINGS 下是 SYNC NOW / BLE PAIRING / SLEEP。设备端不再提供 Wi-Fi/服务器配置界面——这两项现在只能通过 USB/BLE 命令下发（见下方 USB 控制协议）。
 - **离线闹钟**（`src/alarms.rs` + `src/rtc.rs` 的 PCF8563 硬件闹钟寄存器 + `src/power.rs` 的 GPIO5 深睡唤醒 + `src/audio.rs` 的 ES8311 出声）：闹钟数据存在本地 NVS，响铃完全不依赖网络。芯片只有一路硬件闹钟寄存器，固件会自动把所有已存闹钟里最近的一个写进去。
-- **待办列表**（`src/todos.rs`）：本地 NVS 存储，菜单里可勾选完成、新增（复用 Wi-Fi 密码轮盘同款的字符轮选文字输入）。
-- **HTTPS 同步客户端**（`src/sync.rs`）：从服务器拉取结构化 JSON（闹钟+待办），支持 ETag/304 条件请求，写入本地 store 并重新武装硬件闹钟。契约见 [`docs/sync-api.md`](docs/sync-api.md)。
-- **USB 控制协议**（`src/control.rs` + `src/usb_console.rs`）：复用现有 USB-Serial-JTAG 控制台端口，用 `>>IP `/`<<IP ` 前缀区分命令/回复和普通日志，四个命令：`set_wifi` / `set_server` / `sync_now` / `get_status`。契约见 [`docs/control-protocol.md`](docs/control-protocol.md)。
+- **待办列表**（`src/todos.rs`）：本地 NVS 存储，菜单里可勾选完成/取消。新增待办文本已不在设备端输入，由 Desktop/Server 下发。
+- **HTTPS 同步客户端**（`src/sync.rs`）：双向 POST——设备上传本地 alarms/todos 的 `enabled`/`done` 标记，服务器合并后返回权威的完整列表，写入本地 store 并重新武装硬件闹钟。ETag 仍会被读取缓存，但当前 POST 流程不发 `If-None-Match`（每次都拿完整响应）；旧的 GET + 条件请求仍保留给历史固件兼容用。契约见 [`docs/sync-api.md`](docs/sync-api.md)。
+- **USB 控制协议**（`src/control.rs` + `src/usb_console.rs`）：复用现有 USB-Serial-JTAG 控制台端口，用 `>>IP `/`<<IP ` 前缀区分命令/回复和普通日志，六个命令：`set_wifi` / `set_server` / `sync_now` / `get_status` / `clear_alarms` / `set_timezone`。`usb_console.rs` 已从独立读取线程改为主循环内联轮询（`UsbConsole::poll_command`），不再有单独的 Core0 读取任务。契约见 [`docs/control-protocol.md`](docs/control-protocol.md)。
 - **BLE 控制通道**（`src/ble_control.rs`，`esp32-nimble`）：按需开启（进入"BLE PAIRING"菜单才启动，退出即销毁，NimBLE 常驻要占约 150KB RAM），走同一套命令协议。
-- 统一画布/字体层：`src/canvas.rs`（1bpp 帧缓冲）+ `src/font.rs`（5×7 定宽）+ `src/font8x16.rs`（比例宽字体，来自官方 demo 移植，用于新界面）；`src/ui.rs` 收拢了 3 按键交互的通用组件（列表选择、字符轮选文本输入），`provision.rs`（Wi-Fi 配网向导）和 `screens.rs`（日历/闹钟/待办菜单）共用。
-- Wi-Fi STA（`src/wifi.rs`）+ SNTP + 设备端配网向导（`src/provision.rs`，长按 UP 3s 进入）；`storage.rs` 用 NVS 持久化 Wi-Fi 凭据、服务器配置、同步 ETag。
+- 统一画布/字体层：`src/canvas.rs`（1bpp 帧缓冲，含 `stroke_rect` 描边）+ `src/font8x16.rs`（比例宽字体，来自官方 demo 移植）；`src/ui.rs` 收拢了 3 按键交互的通用组件（列表选择、翻页、导航抽屉），供 `screens.rs`（日历/闹钟/待办/设置）使用。设备端已不做文本输入——用户输入的字符串一律来自 Desktop/Server。
+- Wi-Fi STA（`src/wifi.rs`）+ SNTP，仅在 RTC 时间不可信时于开机时自动连一次；`storage.rs` 用 NVS 持久化 Wi-Fi 凭据、服务器配置、同步 ETag、本地时区偏移。设备端已不提供 Wi-Fi 配网向导，凭据只能通过 USB/BLE 的 `set_wifi`/`set_server` 命令下发。
 - PCF8563 RTC、电量 ADC、深度睡眠（GPIO17 RTC hold）、ES8311 音频、GT23SC6699 NFC、I2C0 共享总线、任务看门狗——均沿用此前已验证的实现。
 
 ### 已知问题：Wi-Fi 二次连接崩溃（已绕过，非根本修复）
@@ -44,10 +44,10 @@ inkpaper-desktop (PC 工具)          inkpaper-server (后端)
 
 - 文件系统、OTA 仍未实现。
 - **真机上完整的"闹钟响铃→ENTER 解除"流程还没有人工确认过**（硬件闹钟寄存器的读写逻辑已验证正确，但没有真正听到/看到响铃解除的全过程）。
-- **BLE 配对完全没有端到端验证过**（固件的 GATT 服务端和 `inkpaper-desktop` 的 `btleplug` 客户端都编译通过、按同一份协议文档实现，但两者从未真正互相通话过，也没用手机 BLE App 测过）。
+- **BLE 配对已经真机验证过一次**：固件 GATT 服务端和 `inkpaper-desktop` 的 `btleplug` 客户端实际连上过，收到过写入+notify 回复（`BLE connected` / `OK`）——但这是在更早的 egui 版 Desktop 下测的。**换成现在的 Tauri/Vue 版 Desktop 之后这条验证需要重新做一遍**（USB 那边同理）。完整调试记录见工作区根目录的 `INKPAPER_ENGINEERING_HISTORY.md` 第 4.3/11 节。
 - Wi-Fi 二次连接的"重启后重试"体验需要用真实的 `espflash monitor` 会话确认（连续触发两次 `sync_now`，确认第一次干净重启、第二次真正连上并同步成功）。
 
-完整的环境、安全事项、构建、烧录、调试与故障排查见 **[docs/development-guide.md](docs/development-guide.md)**；日历/闹钟/待办功能的完整开发过程和踩坑记录见 **[docs/calendar-alarm-todo-plan.md](docs/calendar-alarm-todo-plan.md)**；跨三个仓库的整体进度快照见 **[docs/project-status.md](docs/project-status.md)**。
+完整的环境、安全事项、构建、烧录、调试与故障排查见 **[docs/development-guide.md](docs/development-guide.md)**；日历/闹钟/待办功能的完整开发过程和踩坑记录见 **[docs/calendar-alarm-todo-plan.md](docs/calendar-alarm-todo-plan.md)**；跨三个仓库的整体进度快照见 **[docs/project-status.md](docs/project-status.md)**；更详细的三仓库联合工作纪要（设计决策、真机调试记录、部署方式）见工作区根目录的 **[`../INKPAPER_ENGINEERING_HISTORY.md`](../INKPAPER_ENGINEERING_HISTORY.md)**。
 
 ## 仓库结构
 
@@ -56,7 +56,6 @@ inkpaper/
 ├── docs/
 │   ├── development-guide.md       完整开发指南（必读）
 │   ├── note4-hardware.md          板级 GPIO / 电源轨 / EPD 格式
-│   ├── wifi-connect-issue.md      Wi-Fi STA 连接排查记录（已解决）
 │   ├── calendar-alarm-todo-plan.md 日历/闹钟/待办功能路线图 + Wi-Fi 崩溃调查记录
 │   ├── control-protocol.md        USB/BLE 命令协议规格（给 inkpaper-desktop 对接）
 │   ├── sync-api.md                HTTP 同步协议规格（给 inkpaper-server 对接）
@@ -73,8 +72,8 @@ inkpaper/
 │   │   ├── main.rs                  入口 + 主循环 + Wi-Fi/深睡/闹钟响铃编排
 │   │   ├── alarms.rs                多闹钟 NVS store + 挑最近一个写进 PCF8563 硬件寄存器
 │   │   ├── todos.rs                 待办 NVS store
-│   │   ├── screens.rs               菜单/日历/闹钟/待办界面
-│   │   ├── ui.rs                    3 按键交互通用组件（列表选择、字符轮选文本输入）
+│   │   ├── screens.rs               导航抽屉/日历/闹钟/待办/设置界面
+│   │   ├── ui.rs                    3 按键交互通用组件（列表选择、翻页、导航抽屉）
 │   │   ├── sync.rs                  HTTPS 同步客户端（含 sync_now 的 Wi-Fi 重连规避逻辑）
 │   │   ├── control.rs               USB/BLE 共用的命令/回复协议
 │   │   ├── usb_console.rs           USB 串口命令通道（复用日志端口）
@@ -82,13 +81,11 @@ inkpaper/
 │   │   ├── audio.rs                 ES8311 编解码器
 │   │   ├── board.rs                 电源锁存 / LED / 按键 / 充电 GPIO / ADC / SharedI2c
 │   │   ├── button.rs                消抖 + 短按/1s 长按
-│   │   ├── canvas.rs                1bpp 帧缓冲 + 绘制原语
-│   │   ├── font.rs                  5x7 定宽字模
+│   │   ├── canvas.rs                1bpp 帧缓冲 + 绘制原语（含 stroke_rect 描边）
 │   │   ├── font8x16.rs              比例宽字体（官方 demo 移植）
 │   │   ├── display.rs               EPD 封装 + 主界面布局
 │   │   ├── nfc.rs                   GT23SC6699 NFC
 │   │   ├── power.rs                 深度睡眠 / GPIO17 hold / 唤醒原因判定
-│   │   ├── provision.rs             设备端 Wi-Fi 配网向导
 │   │   ├── rtc.rs                   PCF8563 驱动（含硬件闹钟寄存器）
 │   │   ├── storage.rs               NVS 持久化（Wi-Fi/服务器配置/同步 ETag）
 │   │   ├── watchdog.rs              任务看门狗
@@ -99,7 +96,7 @@ inkpaper/
 └── backups/
 ```
 
-`inkpaper-desktop`（PC 配置工具，Rust + egui，USB/BLE 双传输）和 `inkpaper-server`（后端，Rust + axum + SQLite）是独立仓库，与本仓库同级：`../inkpaper-desktop`、`../inkpaper-server`。
+`inkpaper-desktop`（PC 配置工具，Tauri 2 + Vue 3 + Rust，USB/BLE 双传输）和 `inkpaper-server`（后端，Rust + axum + SQLite）是独立仓库，与本仓库同级：`../inkpaper-desktop`、`../inkpaper-server`。
 
 ## 开发环境
 
@@ -178,7 +175,7 @@ espflash monitor --port /dev/ttyACM0
 2. ~~日历 / 离线闹钟 / 待办~~ 完成（`docs/calendar-alarm-todo-plan.md` 全部 6 个 Phase）。
 3. ~~USB/BLE 配置协议~~ 完成（`control.rs` / `usb_console.rs` / `ble_control.rs`）。
 4. ~~HTTPS 内容同步~~ 完成（`sync.rs`，契约见 `docs/sync-api.md`）。
-5. ~~PC 工具（`inkpaper-desktop`）、服务器（`inkpaper-server`）~~ 首版完成，见各自仓库；两者当前**尚未提交 git**。
+5. ~~PC 工具（`inkpaper-desktop`）、服务器（`inkpaper-server`）~~ 首版完成，见各自仓库；三个仓库现在都已提交 git 并推送到各自的 `origin/main`。
 6. 真机验证：闹钟响铃全流程、BLE 配对端到端、Wi-Fi 重连规避的重启体验——见上方"尚未完成"一节。
 7. 文件系统、OTA、回滚仍未做。
 
