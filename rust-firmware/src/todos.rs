@@ -60,9 +60,3 @@ impl TodoStore {
             .map_err(|e| anyhow!("NVS set_blob({KEY_TODOS}) failed: {e}"))
     }
 }
-
-/// Next unused id, so callers adding a todo don't have to track a counter
-/// themselves - just `id: next_id(&todos)`.
-pub fn next_id(todos: &[Todo]) -> u8 {
-    todos.iter().map(|t| t.id).max().map_or(0, |m| m + 1)
-}

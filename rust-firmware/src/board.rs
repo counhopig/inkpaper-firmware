@@ -33,7 +33,7 @@ const I2C_FREQUENCY: Hertz = Hertz(400_000);
 
 pub struct Note4Board {
     _power_latch: PinDriver<'static, Output>,
-    led: PinDriver<'static, Output>,
+    _led: PinDriver<'static, Output>,
     _avdd_power: PinDriver<'static, Output>,
     pub key_enter: Button,
     pub key_up: Button,
@@ -136,7 +136,7 @@ impl Note4Board {
 
         Ok(Self {
             _power_latch: power_latch,
-            led,
+            _led: led,
             _avdd_power: avdd_power,
             key_enter,
             key_up,
@@ -149,15 +149,6 @@ impl Note4Board {
             audio,
             nfc,
         })
-    }
-
-    pub fn set_led(&mut self, on: bool) -> Result<()> {
-        if on {
-            self.led.set_low()?;
-        } else {
-            self.led.set_high()?;
-        }
-        Ok(())
     }
 
     pub fn charging_state(&self) -> (bool, bool) {

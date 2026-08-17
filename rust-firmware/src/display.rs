@@ -6,22 +6,18 @@ use esp_idf_svc::sys::zectrix_epd::{
 };
 
 use crate::canvas::Canvas;
+use crate::canvas::WIDTH;
 use crate::rtc::DateTime;
 
 pub use crate::canvas::Rect;
 
-/// Consecutive partial refreshes allowed before `refresh_partial` silently
-/// promotes to a full refresh instead. Matches the policy in the upstream
-/// ZECTRIX demo's `docs/UI_FLOW.md` ("After eight UI partial refreshes, the
-/// next update is promoted to full refresh") - this repo's screens do a lot
-/// more partial-refresh churn (clock ticking every ~1.2s) than the original
-/// counter-demo baseline did, so ghosting control matters more here.
-const PARTIAL_REFRESH_PROMOTE_LIMIT: u32 = 8;
+const MONTH_NAMES: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
 
 pub struct EpdDisplay {
     handle: zectrix_epd_handle_t,
     canvas: Canvas,
-    partial_refresh_count: u32,
 }
 
 impl EpdDisplay {
@@ -37,19 +33,18 @@ impl EpdDisplay {
         Ok(Self {
             handle,
             canvas: Canvas::new(),
-            partial_refresh_count: 0,
         })
     }
 
     /// Direct canvas access for screens that don't fit the fixed
-    /// `render_home` layout, e.g. the Wi-Fi setup wizard and `screens.rs`.
+    /// `render_home` layout, e.g. the navigation drawer and `screens.rs`.
     pub fn canvas_mut(&mut self) -> &mut Canvas {
         &mut self.canvas
     }
 
     /// The idle/background screen: clock, next-alarm summary, pending-todo
     /// count. `main.rs` redraws this after returning from any modal screen
-    /// (`screens::open_menu`, the Wi-Fi wizard, an alarm ring).
+    /// (the navigation drawer, settings menu, alarm ring).
     pub fn render_home(
         &mut self,
         clock: Option<&DateTime>,
@@ -57,19 +52,28 @@ impl EpdDisplay {
         todo_pending: usize,
     ) {
         self.canvas.clear();
+        self.canvas.draw_text_prop(16, 8, 1, "INKPAPER");
+        self.canvas.draw_text_prop(316, 8, 1, "NOTE 4");
+        self.canvas.fill_rect(16, 29, 368, 1, true);
         if let Some(dt) = clock {
             self.draw_clock(dt);
+        } else {
+            let dash_w = Canvas::text_prop_width("--:--", 3);
+            let dash_x = (WIDTH - dash_w) / 2;
+            self.canvas.draw_text_prop(dash_x, 52, 3, "--:--");
         }
-        self.canvas.draw_text_prop(20, 60, 3, "INKPAPER");
-        let alarm_line = match next_alarm {
-            Some(label) => format!("NEXT ALARM: {label}"),
-            None => "NEXT ALARM: NONE".to_string(),
-        };
-        self.canvas.draw_text_prop(20, 120, 1, &alarm_line);
+
+        self.canvas.stroke_rect(16, 139, 176, 94, 2);
+        self.canvas.fill_rect(16, 139, 5, 94, true);
+        self.canvas.draw_text_prop(32, 153, 1, "NEXT ALARM");
         self.canvas
-            .draw_text_prop(20, 140, 1, &format!("TODOS PENDING: {todo_pending}"));
+            .draw_text_prop(32, 181, 2, next_alarm.unwrap_or("NONE"));
+
+        self.canvas.stroke_rect(208, 139, 176, 94, 2);
+        self.canvas.fill_rect(208, 139, 5, 94, true);
+        self.canvas.draw_text_prop(224, 153, 1, "OPEN TODOS");
         self.canvas
-            .draw_text_prop(20, 280, 1, "ENTER=MENU  HOLD UP=SETUP  HOLD DOWN=SLEEP");
+            .draw_text_prop(224, 181, 2, &todo_pending.to_string());
     }
 
     #[allow(dead_code)]
@@ -79,16 +83,20 @@ impl EpdDisplay {
     }
 
     fn draw_clock(&mut self, dt: &DateTime) {
-        let date = format!("{:04}-{:02}-{:02}", dt.year, dt.month, dt.day);
-        let time = format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second);
-        self.canvas.draw_text(20, 4, 1, &date);
-        self.canvas.draw_text(20, 14, 2, &time);
-        let status = if dt.voltage_low { "LOW!" } else { "OK" };
-        self.canvas.draw_text(260, 8, 1, &format!("RTC {status}"));
+        let time = format!("{:02}:{:02}", dt.hour, dt.minute);
+        self.canvas.draw_text_prop(24, 44, 4, &time);
+
+        let m_idx = (dt.month as usize).saturating_sub(1).min(11);
+        let md = format!("{} {}", MONTH_NAMES[m_idx], dt.day);
+        let year = format!("{}", dt.year);
+        let md_w = Canvas::text_prop_width(&md, 2);
+        let year_w = Canvas::text_prop_width(&year, 2);
+        self.canvas.draw_text_prop(WIDTH - md_w - 24, 46, 2, &md);
+        self.canvas
+            .draw_text_prop(WIDTH - year_w - 24, 84, 2, &year);
     }
 
     pub fn refresh_full(&mut self) -> Result<()> {
-        self.partial_refresh_count = 0;
         check_epd("power on EPD", unsafe { zectrix_epd_power_on(self.handle) })?;
         let refresh = check_epd("refresh EPD", unsafe {
             zectrix_epd_refresh_full_1bpp(
@@ -103,22 +111,12 @@ impl EpdDisplay {
         refresh.and(power_off)
     }
 
-    /// Silently promotes to a full refresh after
-    /// `PARTIAL_REFRESH_PROMOTE_LIMIT` consecutive partial ones, to bound
-    /// ghosting. Safe to call as often as `refresh_full` itself: every
-    /// caller in this codebase already re-renders the whole canvas (see
-    /// e.g. `main.rs::render_home_now`) before calling either refresh
-    /// method, so promoting mid-call still draws the correct full screen,
-    /// not a stale one. If a single loop iteration ever calls this for
-    /// several rects at once, promotion on an early rect will trigger a
-    /// full refresh per remaining rect too (redundant, not incorrect) -
-    /// not a concern today since no caller passes more than one dirty rect
-    /// per iteration, but worth knowing if that changes.
+    /// Always refreshes only `rect`, never promotes to a full refresh.
+    /// The home clock ticks every ~1.2s so a periodic full flash every
+    /// few seconds would be very visible; boot and alarm-ring still use
+    /// `refresh_full` explicitly. Callers re-render the whole canvas
+    /// before refreshing, so the partial rect always shows fresh pixels.
     pub fn refresh_partial(&mut self, rect: Rect) -> Result<()> {
-        if self.partial_refresh_count >= PARTIAL_REFRESH_PROMOTE_LIMIT {
-            return self.refresh_full();
-        }
-        self.partial_refresh_count += 1;
         check_epd("power on EPD", unsafe { zectrix_epd_power_on(self.handle) })?;
         let pixels = self.canvas.pack_rect(rect);
         let c_rect = zectrix_epd_rect_t {

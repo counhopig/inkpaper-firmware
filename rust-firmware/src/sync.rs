@@ -12,7 +12,7 @@ use embedded_svc::http::client::Client as HttpClient;
 use embedded_svc::http::Method;
 use embedded_svc::utils::io;
 use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::alarms::{self, AlarmStore, StoredAlarm};
 use crate::rtc::{DateTime, Pcf8563};
@@ -27,8 +27,7 @@ use crate::wifi;
 /// for a payload this bounded.
 const RESPONSE_BUF_LEN: usize = 8192;
 
-/// Outcome of a sync operation: either new data was applied with counts, or
-/// the server had no changes (HTTP 304).
+/// Outcome of a bidirectional sync after the merged server state is applied.
 #[derive(Clone, Debug)]
 pub enum SyncOutcome {
     Applied {
@@ -36,7 +35,6 @@ pub enum SyncOutcome {
         todo_count: usize,
         etag: Option<String>,
     },
-    NotModified,
 }
 
 /// Sync response body shape, deserialized directly from the server's JSON -
@@ -50,16 +48,33 @@ struct SyncResponse {
     todos: Vec<Todo>,
 }
 
+#[derive(Debug, Serialize)]
+struct DeviceSyncRequest {
+    alarms: Vec<DeviceAlarmState>,
+    todos: Vec<DeviceTodoState>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceAlarmState {
+    id: u8,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceTodoState {
+    id: u8,
+    done: bool,
+}
+
 /// Fetches alarms and todos from `server_url`, applying conditional-request
-/// semantics via `If-None-Match` with the cached `etag` if present. Returns
-/// either the fetched data's counts and a new ETag (if any), or
-/// `NotModified` if the server sent HTTP 304. Any HTTP error, TLS error, or
+/// semantics. Uploads local mutable flags first and returns the merged
+/// server data's counts and new ETag. Any HTTP error, TLS error, or
 /// JSON parse error returns `Err(...)` with a descriptive message rather
 /// than panicking.
 pub fn fetch_and_apply(
     server_url: &str,
     token: &str,
-    etag: Option<&str>,
+    _etag: Option<&str>,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
     rtc: &mut Pcf8563,
@@ -76,29 +91,60 @@ pub fn fetch_and_apply(
             .map_err(|e| anyhow!("HTTP connection setup failed: {e}"))?,
     );
 
-    let mut headers: Vec<(&str, &str)> = vec![("accept", "application/json")];
+    let local_alarms = alarm_store
+        .load()
+        .map_err(|e| anyhow!("failed to load local alarms for upload: {e}"))?;
+    let local_todos = todo_store
+        .load()
+        .map_err(|e| anyhow!("failed to load local todos for upload: {e}"))?;
+    let upload = DeviceSyncRequest {
+        alarms: local_alarms
+            .iter()
+            .map(|alarm| DeviceAlarmState {
+                id: alarm.id,
+                enabled: alarm.enabled,
+            })
+            .collect(),
+        todos: local_todos
+            .iter()
+            .map(|todo| DeviceTodoState {
+                id: todo.id,
+                done: todo.done,
+            })
+            .collect(),
+    };
+    let request_body =
+        serde_json::to_vec(&upload).map_err(|e| anyhow!("device sync JSON encode failed: {e}"))?;
+    let content_length = request_body.len().to_string();
+    let mut headers: Vec<(&str, &str)> = vec![
+        ("accept", "application/json"),
+        ("content-type", "application/json"),
+        ("content-length", &content_length),
+    ];
     let auth_header;
     if !token.is_empty() {
         auth_header = format!("Bearer {token}");
         headers.push(("authorization", &auth_header));
     }
-    if let Some(etag) = etag {
-        headers.push(("if-none-match", etag));
+    let mut request = client
+        .request(Method::Post, server_url, &headers)
+        .map_err(|e| anyhow!("POST {server_url} failed to start: {e}"))?;
+    let mut written = 0usize;
+    while written < request_body.len() {
+        let count = request
+            .write(&request_body[written..])
+            .map_err(|e| anyhow!("POST {server_url} body write failed: {e}"))?;
+        if count == 0 {
+            return Err(anyhow!("POST {server_url} body write made no progress"));
+        }
+        written += count;
     }
-
-    let request = client
-        .request(Method::Get, server_url, &headers)
-        .map_err(|e| anyhow!("GET {server_url} failed to start: {e}"))?;
     let mut response = request
         .submit()
-        .map_err(|e| anyhow!("GET {server_url} failed: {e}"))?;
+        .map_err(|e| anyhow!("POST {server_url} failed: {e}"))?;
 
     let status = response.status();
     watchdog::feed();
-    if status == 304 {
-        log::info!("Sync: server reports no changes (304)");
-        return Ok(SyncOutcome::NotModified);
-    }
     if status != 200 {
         return Err(anyhow!("sync request failed: HTTP {status}"));
     }

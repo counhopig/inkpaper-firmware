@@ -1,23 +1,31 @@
 # Sync API Contract
 
 This document specifies the HTTP contract between the inkpaper firmware and the
-`inkpaper-server` backend service. The firmware polls this endpoint periodically
-to stay synchronized with server-hosted alarms and todos.
+`inkpaper-server` backend service. The firmware uses this endpoint for
+bidirectional synchronization of server-hosted alarms and todos.
 
 ## Request
 
 ```
-GET {server_url}
+POST {server_url}
 Authorization: Bearer {auth_token}
-If-None-Match: {etag}  (optional, only if a previous sync returned an ETag)
+Content-Type: application/json
+
+{
+  "alarms": [{"id": 0, "enabled": true}],
+  "todos": [{"id": 0, "done": true}]
+}
 ```
 
 ### Headers
 
 - **Authorization** (required): `Bearer {auth_token}` where `auth_token` is the
   authentication token configured on the device.
-- **If-None-Match** (optional): The ETag value from the previous successful sync
-  response, if any. Omitted on the first request or if the cached ETag is lost.
+- The device uploads only locally editable state: alarm `enabled` and todo
+  `done`. It never uploads text, schedules, additions, or deletions.
+- Unknown IDs are ignored, so stale device data cannot recreate content that
+  Desktop or Server deleted.
+- The server merges these flags and returns its complete authoritative lists.
 
 ## Response
 
@@ -102,15 +110,9 @@ The ETag value is opaque to the firmware; it is cached and passed back
 verbatim (quotes included, if the server sent them) in the next request's
 `If-None-Match` header.
 
-### HTTP 304 Not Modified
-
-Returned when:
-- The client included an `If-None-Match` header with a cached ETag, and
-- The server's current alarm/todo list matches that ETag (i.e., no changes have
-  been made since the last sync).
-
-No body is present. The firmware does not modify its local stores and continues
-using the previously-synced data.
+`GET /api/sync` and conditional HTTP 304 remain available for older firmware,
+but current firmware uses `POST` so local completion/enabled changes are never
+discarded before upload.
 
 ### Other Status Codes
 

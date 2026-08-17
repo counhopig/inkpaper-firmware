@@ -77,6 +77,21 @@ pub fn enter_deep_sleep_with_wakeups(resync_interval: Option<std::time::Duration
     unsafe { esp_deep_sleep_start() };
 }
 
+/// Performs a controlled software power-cycle using only a short timer
+/// wakeup. Unlike normal sleep this deliberately excludes ENTER and RTC_INT:
+/// an already-low alarm line must not turn an internal Wi-Fi recovery reboot
+/// into a false alarm wake.
+pub fn restart_via_deep_sleep(delay: std::time::Duration) -> ! {
+    let ret = unsafe { esp_sleep_enable_timer_wakeup(delay.as_micros() as u64) };
+    if ret != 0 {
+        log::error!("esp_sleep_enable_timer_wakeup(restart) failed: 0x{ret:x}");
+    }
+    unsafe { esp_sleep_enable_gpio_switch(false) };
+    unsafe { gpio_hold_en(GPIO_NUM_17) };
+    log::info!("Controlled deep-sleep restart; timer wake only");
+    unsafe { esp_deep_sleep_start() };
+}
+
 /// Disambiguates which ext1 pin caused the wake. Must be called before any
 /// GPIO reconfiguration that might change pin levels.
 pub fn wake_cause() -> WakeCause {

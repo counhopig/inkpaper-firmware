@@ -6,11 +6,9 @@ mod button;
 mod canvas;
 mod control;
 mod display;
-mod font;
 mod font8x16;
 mod nfc;
 mod power;
-mod provision;
 mod rtc;
 mod screens;
 mod storage;
@@ -43,22 +41,20 @@ const STATUS_REPORT_INTERVAL_POLLS: u32 = 50;
 /// once per refresh.
 const CLOCK_POLL_INTERVAL_POLLS: u32 = 60;
 
-/// Bounding rect for the date/time + RTC status line drawn by
-/// `display::EpdDisplay::draw_clock`. Matches `display.rs` (date 20,4
-/// scale 1; time 20,14 scale 2; status 260,8 scale 1) with margin.
+/// Bounding rect for the large home clock and its date/status metadata.
 const CLOCK_RECT: Rect = Rect {
     x: 16,
-    y: 0,
-    width: 304,
-    height: 32,
+    y: 36,
+    width: 368,
+    height: 92,
 };
 
-/// Hold DOWN for this long (wall-clock, not poll cycles - a poll-cycle
-/// counter under-counts whenever an iteration blocks for a while, e.g. the
-/// full EPD refresh the 1 s "long press" gesture triggers mid-hold) to
-/// enter deep sleep. Intentionally longer than that 1 s long-press so the
-/// two gestures don't collide.
-const DEEP_SLEEP_HOLD: Duration = Duration::from_secs(3);
+const FULL_SCREEN_RECT: Rect = Rect {
+    x: 0,
+    y: 0,
+    width: 400,
+    height: 300,
+};
 
 /// Epoch seconds captured at firmware build time. Used as the fallback RTC
 /// seed when PCF8563 reports `voltage_low = true` (battery was disconnected
@@ -90,7 +86,7 @@ fn main() -> Result<()> {
     if let Err(err) = watchdog::subscribe() {
         log::warn!("Task watchdog subscribe failed: {err}");
     }
-    let woke_from_deep_sleep = power::log_wakeup_cause();
+    power::log_wakeup_cause();
     let mut board = Note4Board::take()?;
     log::info!("Power latch is high; rendering home screen");
 
@@ -106,13 +102,13 @@ fn main() -> Result<()> {
     let counters = PersistedCounters::open(nvs_partition.clone())?;
     let alarm_store = AlarmStore::open(nvs_partition.clone())?;
     let todo_store = TodoStore::open(nvs_partition)?;
-    let usb_console = usb_console::UsbConsole::start();
+    let mut usb_console = usb_console::UsbConsole::start();
 
-    // Wi-Fi/NTP resync is only needed when the RTC time cannot be trusted:
-    // first boot after flashing, a real power-on reset, or the PCF8563
-    // reporting its battery was lost. A wake from deep sleep with a healthy
-    // RTC should stay off Wi-Fi so ENTER responds immediately.
-    let mut needs_wifi_sync = !woke_from_deep_sleep;
+    // Wi-Fi/NTP resync is needed only when the battery-backed RTC cannot be
+    // trusted. A firmware flash or ordinary reset does not erase PCF8563
+    // time, so connecting on every reset merely consumes the one safe Wi-Fi
+    // session and forces the first user-triggered Sync Now to reboot.
+    let mut needs_wifi_sync = false;
     let mut clock = match board.rtc.read_time() {
         Ok(mut dt) => {
             log::info!(
@@ -147,9 +143,8 @@ fn main() -> Result<()> {
     // Ring before the normal boot render, if this boot is the RTC alarm
     // firing: latency to sound matters more than latency to the home
     // screen. `power::wake_cause()` reads `esp_sleep_get_wakeup_cause`
-    // again (harmless, not a consuming read) rather than threading the
-    // value through from `woke_from_deep_sleep` above, since that bool
-    // collapses ENTER-wake and alarm-wake into the same case.
+    // again (harmless, not a consuming read); unlike the raw cause logged
+    // above, this distinguishes ENTER-wake from alarm-wake.
     if power::wake_cause() == power::WakeCause::RtcAlarm {
         log::info!("Woke from RTC alarm; ringing");
         ring_alarm_until_dismissed(&mut board)?;
@@ -217,11 +212,10 @@ fn main() -> Result<()> {
     // (`wifi_ssid` / `wifi_pass`), then sync the clock over NTP and push the
     // time into the PCF8563 so it keeps ticking while the device sleeps.
     // Failure to connect or sync only logs a warning; the rest of the UI
-    // keeps working regardless. Skipped on a deep-sleep wake with a healthy
-    // RTC so ENTER wakes the device up instantly instead of blocking on the
-    // network for several seconds.
+    // keeps working regardless. A healthy battery-backed RTC needs no boot
+    // network traffic, leaving the one safe Wi-Fi session for Sync Now.
     if !needs_wifi_sync {
-        log::info!("Woke from deep sleep with a healthy RTC; skipping Wi-Fi/NTP resync");
+        log::info!("RTC is healthy; skipping boot-time Wi-Fi/NTP resync");
     } else {
         match counters.wifi_creds() {
             Ok(Some(creds)) => match wifi_mgr.connect(&creds) {
@@ -258,24 +252,11 @@ fn main() -> Result<()> {
         }
     };
 
-    let mut led_on = false;
-    let mut led_tick = 0u32;
     let mut status_tick = 0u32;
     let mut clock_tick = 0u32;
-    let mut down_held_since: Option<Duration> = None;
-    let mut up_held_since: Option<Duration> = None;
     let mut ble_control: Option<ble_control::BleControl> = None;
     loop {
         watchdog::feed();
-        let now = EspSystemTime {}.now();
-
-        led_tick += 1;
-        if led_tick >= 12 {
-            led_tick = 0;
-            led_on = !led_on;
-            board.set_led(led_on)?;
-        }
-
         status_tick += 1;
         if status_tick >= STATUS_REPORT_INTERVAL_POLLS {
             status_tick = 0;
@@ -285,7 +266,6 @@ fn main() -> Result<()> {
         }
 
         let mut dirty: Vec<Rect> = Vec::new();
-        let mut full_refresh = false;
 
         clock_tick += 1;
         if clock_tick >= CLOCK_POLL_INTERVAL_POLLS {
@@ -342,8 +322,24 @@ fn main() -> Result<()> {
         if let Some(event) = board.key_enter.poll() {
             match event {
                 ButtonEvent::Pressed => {
-                    log::info!("ENTER pressed; opening menu");
-                    screens::open_menu(
+                    // Home has no primary action. Settings is reached only
+                    // through the long-UP/DOWN navigation drawer.
+                }
+                ButtonEvent::LongPressed => {
+                    // Home is the root screen, so "back" stays on Home.
+                    log::info!("ENTER long pressed on Home; already at root");
+                }
+                ButtonEvent::Released => {}
+            }
+        }
+        if let Some(event) = board.key_up.poll() {
+            match event {
+                ButtonEvent::Pressed => {
+                    // Home has no vertical selection.
+                }
+                ButtonEvent::LongPressed => {
+                    log::info!("UP long pressed; opening navigation");
+                    screens::open_navigation(
                         &mut board,
                         &counters,
                         &mut wifi_mgr,
@@ -352,74 +348,45 @@ fn main() -> Result<()> {
                         clock.as_ref(),
                         &mut ble_control,
                     );
-                    full_refresh = true;
-                }
-                ButtonEvent::LongPressed => {
-                    log::info!("ENTER long pressed; full refresh to clean ghosting");
-                    full_refresh = true;
+                    dirty.push(FULL_SCREEN_RECT);
                 }
                 ButtonEvent::Released => {}
-            }
-        }
-        if let Some(event) = board.key_up.poll() {
-            match event {
-                ButtonEvent::Pressed => {
-                    up_held_since = Some(now);
-                }
-                ButtonEvent::LongPressed => {
-                    log::info!("UP long pressed; full refresh to clean ghosting");
-                    full_refresh = true;
-                }
-                ButtonEvent::Released => {
-                    up_held_since = None;
-                }
-            }
-        }
-        // Wall-clock hold check, not a poll-cycle count: an iteration that
-        // triggers a full EPD refresh (e.g. the long-press above) can block
-        // for well over a second, and a cycle counter would undercount that
-        // dead time instead of reflecting how long the button was actually
-        // held.
-        if let Some(since) = up_held_since {
-            if now.saturating_sub(since) >= provision::ENTER_HOLD {
-                log::info!("UP held for 3 s; entering Wi-Fi setup wizard");
-                up_held_since = None;
-                provision::run(&mut board, &counters, &mut wifi_mgr);
-                full_refresh = true;
             }
         }
 
         if let Some(event) = board.key_down.poll() {
             match event {
                 ButtonEvent::Pressed => {
-                    down_held_since = Some(now);
+                    // Home has no vertical selection.
                 }
                 ButtonEvent::LongPressed => {
-                    log::info!("DOWN long pressed; full refresh to clean ghosting");
-                    full_refresh = true;
+                    log::info!("DOWN long pressed; opening navigation");
+                    screens::open_navigation(
+                        &mut board,
+                        &counters,
+                        &mut wifi_mgr,
+                        &alarm_store,
+                        &todo_store,
+                        clock.as_ref(),
+                        &mut ble_control,
+                    );
+                    dirty.push(FULL_SCREEN_RECT);
                 }
-                ButtonEvent::Released => {
-                    down_held_since = None;
-                }
-            }
-        }
-        if let Some(since) = down_held_since {
-            if now.saturating_sub(since) >= DEEP_SLEEP_HOLD {
-                log::info!("DOWN held for 3 s; entering deep sleep");
-                render_home_now(&mut board, &alarm_store, &todo_store, clock.as_ref());
-                board.display.refresh_full()?;
-                power::enter_deep_sleep_with_wakeups(None);
+                ButtonEvent::Released => {}
             }
         }
 
-        if full_refresh {
+        if !dirty.is_empty() {
             render_home_now(&mut board, &alarm_store, &todo_store, clock.as_ref());
-            board.display.refresh_full()?;
-            log::info!("Full display refresh completed");
-        } else if !dirty.is_empty() {
-            render_home_now(&mut board, &alarm_store, &todo_store, clock.as_ref());
-            for rect in &dirty {
-                board.display.refresh_partial(*rect)?;
+            if dirty
+                .iter()
+                .any(|rect| rect.width == 400 && rect.height == 300)
+            {
+                board.display.refresh_partial(FULL_SCREEN_RECT)?;
+            } else {
+                for rect in &dirty {
+                    board.display.refresh_partial(*rect)?;
+                }
             }
             log::info!("Partial display refresh completed");
         }
@@ -494,7 +461,10 @@ fn ring_alarm_until_dismissed(board: &mut Note4Board) -> Result<()> {
             break;
         }
         if let Some(audio) = board.audio.as_mut() {
-            if let Err(err) = audio.play_sine_stereo(880.0, 0.3, 8000) {
+            // Keep tone chunks short so the debouncer receives enough polls
+            // while ENTER is held/released. A 300ms blocking tone made a
+            // normal press almost impossible to observe.
+            if let Err(err) = audio.play_sine_stereo(880.0, 0.05, 8000) {
                 log::warn!("Alarm tone playback failed: {err}");
             }
         } else {

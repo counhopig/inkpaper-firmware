@@ -1,17 +1,15 @@
-//! Menu/Calendar/Alarms/Todos screens, entered from the Home screen's ENTER
-//! short-press (see `main.rs`). Each screen is a self-contained blocking
-//! function, following the convention established in `provision.rs`.
+//! Menu/Calendar/Alarms/Todos screens, entered from the Home screen's
+//! long UP/DOWN navigation drawer (see `main.rs`). Each screen is a
+//! self-contained blocking function.
 
 use crate::alarms::{self, AlarmStore, Repeat, StoredAlarm};
 use crate::board::Note4Board;
-use crate::provision;
+use crate::display::Rect;
 use crate::rtc::{is_leap, DateTime};
-use crate::storage::{DeviceConfig, PersistedCounters};
+use crate::storage::PersistedCounters;
 use crate::sync;
-use crate::todos::{self, Todo, TodoStore};
-use crate::ui::{
-    enter_text, footer, header, pick_from_list, pick_number, poll_nav, show_message, tick, Nav,
-};
+use crate::todos::TodoStore;
+use crate::ui::{footer, header, pick_from_list, pick_number, poll_nav, show_message, tick, Nav};
 use crate::wifi::WifiManager;
 
 /// Entry point from Home's ENTER short-press: shows the top-level menu and
@@ -29,48 +27,281 @@ pub fn open_menu(
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
     let items = [
-        "CALENDAR".to_string(),
-        "ALARMS".to_string(),
-        "TODOS".to_string(),
-        "SERVER SETUP".to_string(),
         "SYNC NOW".to_string(),
-        "WIFI SETUP".to_string(),
         "BLE PAIRING".to_string(),
+        "SLEEP".to_string(),
     ];
     loop {
-        let Some(index) =
-            pick_from_list(board, "MENU", &items, "UP/DOWN=MOVE ENTER=PICK HOLD=BACK")
-        else {
+        let Some(index) = pick_from_list(
+            board,
+            "SETTINGS",
+            &items,
+            "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
+        ) else {
             return;
         };
         match index {
-            0 => calendar_screen(board, now),
-            1 => alarms_screen(board, alarm_store, now),
-            2 => todos_screen(board, todo_store),
-            3 => server_setup_screen(board, counters),
-            4 => sync_now_screen(board, counters, wifi_mgr, alarm_store, todo_store, now),
-            5 => provision::run(board, counters, wifi_mgr),
-            6 => ble_pairing_screen(board, ble_control),
+            0 => sync_now_screen(board, counters, wifi_mgr, alarm_store, todo_store, now),
+            1 => ble_pairing_screen(
+                board,
+                counters,
+                wifi_mgr,
+                alarm_store,
+                todo_store,
+                now,
+                ble_control,
+            ),
+            2 => {
+                show_message(
+                    board,
+                    "SLEEP",
+                    &["GOING TO SLEEP"],
+                    std::time::Duration::from_millis(500),
+                );
+                crate::power::enter_deep_sleep_with_wakeups(None);
+            }
             _ => {}
         }
     }
 }
 
-fn calendar_screen(board: &mut Note4Board, now: Option<&DateTime>) {
-    let canvas = board.display.canvas_mut();
-    canvas.clear();
-    header(canvas, "CALENDAR");
-    match now {
-        Some(dt) => draw_month_grid(canvas, dt),
-        None => {
-            canvas.draw_text_prop(8, 40, 1, "NO CLOCK AVAILABLE");
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    Home,
+    Calendar,
+    Alarms,
+    Todos,
+}
+
+fn pick_navigation(board: &mut Note4Board) -> Option<usize> {
+    let destinations = [
+        "HOME".to_string(),
+        "CALENDAR".to_string(),
+        "ALARMS".to_string(),
+        "TODOS".to_string(),
+        "SETTINGS".to_string(),
+    ];
+    let mut selected = 0usize;
+    let mut needs_redraw = true;
+    loop {
+        if needs_redraw {
+            let canvas = board.display.canvas_mut();
+
+            // Left navigation drawer. Deliberately do not clear the canvas:
+            // the current page remains visible to the right of the drawer.
+            canvas.fill_rect(0, 0, 224, 300, false);
+            canvas.fill_rect(216, 0, 2, 300, true);
+            canvas.draw_text_prop(20, 20, 1, "INKPAPER");
+            canvas.draw_text_prop(20, 40, 2, "GO TO");
+            canvas.fill_rect(20, 75, 178, 1, true);
+
+            let mut y = 88usize;
+            for (index, destination) in destinations.iter().enumerate() {
+                if index == selected {
+                    canvas.stroke_rect(12, y, 194, 34, 2);
+                    canvas.fill_rect(12, y, 5, 34, true);
+                    canvas.draw_text_prop(28, y + 8, 1, destination);
+                } else {
+                    canvas.fill_rect(12, y, 194, 34, false);
+                    canvas.draw_text_prop(28, y + 8, 1, destination);
+                }
+                y += 38;
+            }
+            let _ = board.display.refresh_partial(Rect {
+                x: 0,
+                y: 0,
+                width: 224,
+                height: 300,
+            });
+            needs_redraw = false;
+        }
+
+        match poll_nav(board) {
+            Nav::Up => {
+                selected = if selected == 0 {
+                    destinations.len() - 1
+                } else {
+                    selected - 1
+                };
+                needs_redraw = true;
+            }
+            Nav::Down => {
+                selected = (selected + 1) % destinations.len();
+                needs_redraw = true;
+            }
+            Nav::Enter => return Some(selected),
+            Nav::Cancel => return None,
+            Nav::PageUp | Nav::PageDown | Nav::None => {}
+        }
+        tick();
+    }
+}
+
+/// Opens the global navigation directory. Both long UP and long DOWN enter
+/// this directory; short UP/DOWN selects a destination and ENTER opens it.
+pub fn open_navigation(
+    board: &mut Note4Board,
+    counters: &PersistedCounters,
+    wifi_mgr: &mut WifiManager,
+    alarm_store: &AlarmStore,
+    todo_store: &TodoStore,
+    now: Option<&DateTime>,
+    ble_control: &mut Option<crate::ble_control::BleControl>,
+) {
+    loop {
+        let Some(selected) = pick_navigation(board) else {
+            return;
+        };
+        match selected {
+            0 => return,
+            1..=3 => {
+                let page = match selected {
+                    1 => Page::Calendar,
+                    2 => Page::Alarms,
+                    _ => Page::Todos,
+                };
+                browse_page(
+                    board,
+                    page,
+                    counters,
+                    wifi_mgr,
+                    alarm_store,
+                    todo_store,
+                    now,
+                    ble_control,
+                );
+                return;
+            }
+            4 => open_menu(
+                board,
+                counters,
+                wifi_mgr,
+                alarm_store,
+                todo_store,
+                now,
+                ble_control,
+            ),
+            _ => {}
         }
     }
-    footer(canvas, "HOLD=BACK");
-    let _ = board.display.refresh_full();
+}
+
+/// Runs one peer content page. Long UP/DOWN opens the navigation overlay;
+/// cancelling that overlay restores this page.
+fn browse_page(
+    board: &mut Note4Board,
+    mut page: Page,
+    counters: &PersistedCounters,
+    wifi_mgr: &mut WifiManager,
+    alarm_store: &AlarmStore,
+    todo_store: &TodoStore,
+    now: Option<&DateTime>,
+    ble_control: &mut Option<crate::ble_control::BleControl>,
+) {
+    let mut alarm_selected = 0usize;
+    let mut todo_selected = 0usize;
+    let mut needs_redraw = true;
+    let mut first_draw = true;
     loop {
-        if matches!(poll_nav(board), Nav::Cancel) {
-            return;
+        if needs_redraw {
+            match page {
+                Page::Home => {
+                    let next_alarm = now.and_then(|dt| next_alarm_label(alarm_store, dt));
+                    board.display.render_home(
+                        now,
+                        next_alarm.as_deref(),
+                        pending_todo_count(todo_store),
+                    );
+                }
+                Page::Calendar => {
+                    let canvas = board.display.canvas_mut();
+                    canvas.clear();
+                    header(canvas, "CALENDAR");
+                    if let Some(dt) = now {
+                        draw_month_grid(canvas, dt.year, dt.month, now);
+                    }
+                    footer(canvas, "HOLD UP/DOWN SWITCH PAGE");
+                }
+                Page::Alarms => render_alarm_page(board, alarm_store, alarm_selected),
+                Page::Todos => render_todo_page(board, todo_store, todo_selected),
+            }
+            if first_draw {
+                let _ = board.display.refresh_full();
+                first_draw = false;
+            } else {
+                let _ = board.display.refresh_partial(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 400,
+                    height: 300,
+                });
+            }
+            needs_redraw = false;
+        }
+
+        match poll_nav(board) {
+            Nav::PageUp | Nav::PageDown => {
+                match pick_navigation(board) {
+                    Some(0) => return,
+                    Some(1) => page = Page::Calendar,
+                    Some(2) => page = Page::Alarms,
+                    Some(3) => page = Page::Todos,
+                    Some(4) => open_menu(
+                        board,
+                        counters,
+                        wifi_mgr,
+                        alarm_store,
+                        todo_store,
+                        now,
+                        ble_control,
+                    ),
+                    Some(_) | None => {}
+                }
+                needs_redraw = true;
+            }
+            Nav::Cancel => {
+                if page == Page::Home {
+                    return;
+                }
+                page = Page::Home;
+                needs_redraw = true;
+            }
+            Nav::Up => match page {
+                Page::Alarms => {
+                    alarm_selected = alarm_selected.saturating_sub(1);
+                    needs_redraw = true;
+                }
+                Page::Todos => {
+                    todo_selected = todo_selected.saturating_sub(1);
+                    needs_redraw = true;
+                }
+                _ => {}
+            },
+            Nav::Down => match page {
+                Page::Alarms => {
+                    let len = alarm_store.load().map(|v| v.len()).unwrap_or(0) + 1;
+                    alarm_selected = (alarm_selected + 1).min(len - 1);
+                    needs_redraw = true;
+                }
+                Page::Todos => {
+                    let len = todo_store.load().map(|v| v.len()).unwrap_or(0);
+                    if len > 0 {
+                        todo_selected = (todo_selected + 1).min(len - 1);
+                        needs_redraw = true;
+                    }
+                }
+                _ => {}
+            },
+            Nav::Enter => {
+                match page {
+                    Page::Home => {}
+                    Page::Alarms => activate_alarm_row(board, alarm_store, now, alarm_selected),
+                    Page::Todos => activate_todo_row(todo_store, todo_selected),
+                    Page::Calendar => {}
+                }
+                needs_redraw = true;
+            }
+            Nav::None => {}
         }
         tick();
     }
@@ -78,30 +309,46 @@ fn calendar_screen(board: &mut Note4Board, now: Option<&DateTime>) {
 
 /// Read-only current-month grid, today highlighted. No month navigation in
 /// v1 - the device always shows "now".
-fn draw_month_grid(canvas: &mut crate::canvas::Canvas, dt: &DateTime) {
-    let title = format!("{:04}-{:02}", dt.year, dt.month);
-    canvas.draw_text_prop(8, 32, 2, &title);
+fn draw_month_grid(
+    canvas: &mut crate::canvas::Canvas,
+    year: u16,
+    month: u8,
+    today: Option<&DateTime>,
+) {
+    let title = format!("{:04} / {:02}", year, month);
+    canvas.draw_text_prop(16, 38, 2, &title);
 
     const LABELS: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
-    const COL_WIDTH: usize = 54;
-    const ROW_HEIGHT: usize = 28;
-    const ORIGIN_X: usize = 8;
-    const ORIGIN_Y: usize = 64;
+    const COL_WIDTH: usize = 52;
+    const ROW_HEIGHT: usize = 27;
+    const ORIGIN_X: usize = 18;
+    const ORIGIN_Y: usize = 75;
 
     for (i, label) in LABELS.iter().enumerate() {
-        canvas.draw_text_prop(ORIGIN_X + i * COL_WIDTH, ORIGIN_Y, 1, label);
+        let x = ORIGIN_X + i * COL_WIDTH;
+        if i == 0 || i == 6 {
+            canvas.stroke_rect(x.saturating_sub(4), ORIGIN_Y - 5, 34, 25, 1);
+            canvas.draw_text_prop(x, ORIGIN_Y, 1, label);
+        } else {
+            canvas.draw_text_prop(x, ORIGIN_Y, 1, label);
+        }
     }
+    canvas.fill_rect(16, 99, 368, 1, true);
 
-    let days_in_month = days_in_month(dt.year, dt.month);
-    let mut col = weekday_of(dt.year, dt.month, 1) as usize;
+    let days_in_month = days_in_month(year, month);
+    let mut col = weekday_of(year, month, 1) as usize;
     let mut row = 1usize;
     for day in 1..=days_in_month {
         let x = ORIGIN_X + col * COL_WIDTH;
         let y = ORIGIN_Y + row * ROW_HEIGHT;
         let text = day.to_string();
-        if day == dt.day {
-            canvas.fill_rect(x.saturating_sub(2), y.saturating_sub(2), 40, 22, true);
-            canvas.draw_text_prop_white(x, y, 1, &text);
+        let is_today = today
+            .map(|dt| dt.year == year && dt.month == month && dt.day == day)
+            .unwrap_or(false);
+        if is_today {
+            canvas.stroke_rect(x.saturating_sub(6), y.saturating_sub(5), 34, 25, 2);
+            canvas.fill_rect(x.saturating_sub(6), y.saturating_sub(5), 4, 25, true);
+            canvas.draw_text_prop(x, y, 1, &text);
         } else {
             canvas.draw_text_prop(x, y, 1, &text);
         }
@@ -134,42 +381,6 @@ fn weekday_of(year: u16, month: u8, day: u8) -> u8 {
     ((y + y / 4 - y / 100 + y / 400 + T[(month - 1) as usize] + day as i64) % 7) as u8
 }
 
-fn alarms_screen(board: &mut Note4Board, store: &AlarmStore, now: Option<&DateTime>) {
-    loop {
-        let mut list = match store.load() {
-            Ok(list) => list,
-            Err(err) => {
-                log::warn!("Failed to load alarms: {err}");
-                Vec::new()
-            }
-        };
-        let mut items: Vec<String> = list.iter().map(format_alarm_row).collect();
-        items.push("+ ADD ALARM".to_string());
-
-        let Some(index) = pick_from_list(board, "ALARMS", &items, "ENTER=TOGGLE HOLD=BACK") else {
-            return;
-        };
-
-        if index == list.len() {
-            let Some(new_alarm) = add_alarm_screen(board, &list) else {
-                continue;
-            };
-            list.push(new_alarm);
-        } else {
-            list[index].enabled = !list[index].enabled;
-        }
-
-        if let Err(err) = store.save(&list) {
-            log::warn!("Failed to save alarms: {err}");
-        }
-        if let Some(rtc_now) = now {
-            if let Err(err) = alarms::program_hardware_alarm(&mut board.rtc, &list, rtc_now) {
-                log::warn!("Failed to reprogram hardware alarm: {err}");
-            }
-        }
-    }
-}
-
 fn format_alarm_row(alarm: &StoredAlarm) -> String {
     let mark = if alarm.enabled { "[X]" } else { "[ ]" };
     let when = match alarm.repeat {
@@ -182,6 +393,92 @@ fn format_alarm_row(alarm: &StoredAlarm) -> String {
         }
     };
     format!("{mark} {when}")
+}
+
+fn render_rows(canvas: &mut crate::canvas::Canvas, title: &str, items: &[String], selected: usize) {
+    canvas.clear();
+    header(canvas, title);
+    let selected = selected.min(items.len().saturating_sub(1));
+    let first = selected.saturating_sub(crate::ui::MAX_LISTED_ITEMS - 1);
+    let mut y = 39usize;
+    for (index, item) in items
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(crate::ui::MAX_LISTED_ITEMS)
+    {
+        if index == selected {
+            canvas.stroke_rect(16, y, 368, 29, 2);
+            canvas.fill_rect(16, y, 5, 29, true);
+            canvas.draw_text_prop(30, y + 6, 1, ">");
+            canvas.draw_text_prop(50, y + 6, 1, item);
+        } else {
+            canvas.draw_text_prop(24, y + 6, 1, item);
+        }
+        y += 31;
+    }
+    footer(canvas, "UP/DOWN MOVE   ENTER OK   HOLD UP/DOWN PAGE");
+}
+
+fn render_alarm_page(board: &mut Note4Board, store: &AlarmStore, selected: usize) {
+    let mut items: Vec<String> = store
+        .load()
+        .unwrap_or_default()
+        .iter()
+        .map(format_alarm_row)
+        .collect();
+    items.push("+ ADD ALARM".to_string());
+    render_rows(board.display.canvas_mut(), "ALARMS", &items, selected);
+}
+
+fn activate_alarm_row(
+    board: &mut Note4Board,
+    store: &AlarmStore,
+    now: Option<&DateTime>,
+    selected: usize,
+) {
+    let mut list = store.load().unwrap_or_default();
+    if selected >= list.len() {
+        if let Some(alarm) = add_alarm_screen(board, &list) {
+            list.push(alarm);
+        } else {
+            return;
+        }
+    } else {
+        list[selected].enabled = !list[selected].enabled;
+    }
+    if let Err(err) = store.save(&list) {
+        log::warn!("Failed to save alarms: {err}");
+    }
+    if let Some(dt) = now {
+        if let Err(err) = alarms::program_hardware_alarm(&mut board.rtc, &list, dt) {
+            log::warn!("Failed to reprogram hardware alarm: {err}");
+        }
+    }
+}
+
+fn render_todo_page(board: &mut Note4Board, store: &TodoStore, selected: usize) {
+    let items: Vec<String> = store
+        .load()
+        .unwrap_or_default()
+        .iter()
+        .map(|todo| {
+            let mark = if todo.done { "[X]" } else { "[ ]" };
+            format!("{mark} {}", todo.text)
+        })
+        .collect();
+    render_rows(board.display.canvas_mut(), "TODOS", &items, selected);
+}
+
+fn activate_todo_row(store: &TodoStore, selected: usize) {
+    let mut list = store.load().unwrap_or_default();
+    let Some(todo) = list.get_mut(selected) else {
+        return;
+    };
+    todo.done = !todo.done;
+    if let Err(err) = store.save(&list) {
+        log::warn!("Failed to save todos: {err}");
+    }
 }
 
 /// Two-stage hour/minute stepper for a new daily alarm - editing repeat
@@ -201,50 +498,6 @@ fn add_alarm_screen(board: &mut Note4Board, existing: &[StoredAlarm]) -> Option<
     })
 }
 
-fn todos_screen(board: &mut Note4Board, store: &TodoStore) {
-    loop {
-        let mut list = match store.load() {
-            Ok(list) => list,
-            Err(err) => {
-                log::warn!("Failed to load todos: {err}");
-                Vec::new()
-            }
-        };
-        let mut items: Vec<String> = list
-            .iter()
-            .map(|t| {
-                let mark = if t.done { "[X]" } else { "[ ]" };
-                format!("{mark} {}", t.text)
-            })
-            .collect();
-        items.push("+ ADD TODO".to_string());
-
-        let Some(index) = pick_from_list(board, "TODOS", &items, "ENTER=TOGGLE HOLD=BACK") else {
-            return;
-        };
-
-        if index == list.len() {
-            let Some(text) = enter_text(board, "NEW TODO", None, 40) else {
-                continue;
-            };
-            if text.is_empty() {
-                continue;
-            }
-            list.push(Todo {
-                id: todos::next_id(&list),
-                text,
-                done: false,
-            });
-        } else {
-            list[index].done = !list[index].done;
-        }
-
-        if let Err(err) = store.save(&list) {
-            log::warn!("Failed to save todos: {err}");
-        }
-    }
-}
-
 /// Pending (not-done) todo count, for the Home screen summary line.
 pub fn pending_todo_count(store: &TodoStore) -> usize {
     match store.load() {
@@ -252,51 +505,6 @@ pub fn pending_todo_count(store: &TodoStore) -> usize {
         Err(err) => {
             log::warn!("Failed to load todos for pending count: {err}");
             0
-        }
-    }
-}
-
-/// Server configuration screen: prompts for server URL and auth token via
-/// two-stage text entry (same pattern as add_alarm_screen's hour/minute),
-/// then saves via PersistedCounters::save_device_config.
-fn server_setup_screen(board: &mut Note4Board, counters: &PersistedCounters) {
-    let server_url = enter_text(board, "SERVER URL", None, 128);
-    let Some(server_url) = server_url else {
-        return;
-    };
-    if server_url.is_empty() {
-        return;
-    }
-
-    let auth_token = enter_text(board, "AUTH TOKEN", None, 128);
-    let Some(auth_token) = auth_token else {
-        return;
-    };
-    if auth_token.is_empty() {
-        return;
-    }
-
-    let cfg = DeviceConfig {
-        server_url,
-        auth_token,
-    };
-    match counters.save_device_config(&cfg) {
-        Ok(()) => {
-            show_message(
-                board,
-                "SAVED",
-                &["Server config saved"],
-                std::time::Duration::from_secs(2),
-            );
-        }
-        Err(err) => {
-            show_message(
-                board,
-                "ERROR",
-                &["Failed to save config"],
-                std::time::Duration::from_secs(2),
-            );
-            log::warn!("Failed to save server config: {err}");
         }
     }
 }
@@ -342,14 +550,6 @@ fn sync_now_screen(
             let msg = format!("Alarms: {} Todos: {}", alarm_count, todo_count);
             show_message(board, "SYNC OK", &[&msg], std::time::Duration::from_secs(2));
         }
-        Ok(sync::SyncOutcome::NotModified) => {
-            show_message(
-                board,
-                "NOT MODIFIED",
-                &["Server has no changes"],
-                std::time::Duration::from_secs(2),
-            );
-        }
         Err(err) => {
             let err_msg = err.to_string();
             // Truncate long error messages for display - by chars, not
@@ -372,6 +572,11 @@ fn sync_now_screen(
 
 fn ble_pairing_screen(
     board: &mut Note4Board,
+    counters: &PersistedCounters,
+    wifi_mgr: &mut WifiManager,
+    alarm_store: &AlarmStore,
+    todo_store: &TodoStore,
+    now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
     // Start BLE advertising on entry to the pairing screen.
@@ -388,13 +593,36 @@ fn ble_pairing_screen(
             canvas.draw_text_prop(8, 60, 1, "Service UUID:");
             canvas.draw_text_prop(8, 72, 1, "d2c25e50-");
             canvas.draw_text_prop(8, 84, 1, "5e22-48d8...");
-            footer(canvas, "HOLD=BACK");
+            footer(canvas, "HOLD ENTER BACK");
             let _ = board.display.refresh_full();
 
-            // Poll for cancel (HOLD), but don't process commands - they only
-            // run from Home per the documented limitations.
+            // This screen owns the main thread while pairing is active, so it
+            // must drain BLE commands here. Waiting for the outer Home loop
+            // would deadlock the control session because leaving this screen
+            // tears BLE down.
+            let started_at = std::time::Instant::now();
             loop {
-                if matches!(poll_nav(board), Nav::Cancel) {
+                if let Some(cmd) = ble_control.as_ref().and_then(|ble| ble.poll_command()) {
+                    let reply = crate::control::dispatch(
+                        cmd,
+                        board,
+                        counters,
+                        wifi_mgr,
+                        alarm_store,
+                        todo_store,
+                        now,
+                    );
+                    if let Some(ble) = ble_control.as_ref() {
+                        ble.write_reply(&reply);
+                    }
+                }
+                // This is a passive status page with no confirm action, so
+                // either ENTER gesture exits. The timeout is a final escape
+                // hatch if a button event is ever lost while the radio stack
+                // is active.
+                if matches!(poll_nav(board), Nav::Enter | Nav::Cancel)
+                    || started_at.elapsed() >= std::time::Duration::from_secs(120)
+                {
                     break;
                 }
                 tick();

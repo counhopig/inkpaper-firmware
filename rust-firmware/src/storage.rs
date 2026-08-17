@@ -135,4 +135,12 @@ impl PersistedCounters {
             .set_str(KEY_SYNC_ETAG, etag)
             .map_err(|e| anyhow!("NVS set_str({KEY_SYNC_ETAG}) failed: {e}"))
     }
+
+    /// Invalidates conditional-sync state after changing server identity.
+    pub fn clear_sync_etag(&self) -> Result<()> {
+        self.nvs
+            .remove(KEY_SYNC_ETAG)
+            .map(|_| ())
+            .map_err(|e| anyhow!("NVS remove({KEY_SYNC_ETAG}) failed: {e}"))
+    }
 }

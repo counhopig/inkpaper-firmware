@@ -6,7 +6,7 @@ use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::sntp::{EspSntp, SntpConf, SyncStatus};
 use esp_idf_svc::systime::EspSystemTime;
-use esp_idf_svc::wifi::{AccessPointInfo, AuthMethod, ClientConfiguration, Configuration, EspWifi};
+use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration, EspWifi};
 use heapless::String as HeaplessString;
 
 use crate::rtc::{DateTime, Pcf8563};
@@ -226,28 +226,6 @@ impl WifiManager {
             log::warn!("esp_wifi_disconnect failed: 0x{ret:x}");
         }
     }
-
-    /// Scans for nearby 2.4 GHz access points and returns them sorted by
-    /// signal strength (strongest first), deduplicated by SSID. Used by the
-    /// on-device Wi-Fi setup screen so the user picks a network instead of
-    /// typing an SSID by hand - the exact step that let a case typo
-    /// (`XiaoMi_ED4E` vs the broadcast `Xiaomi_ED4E`) break `connect()` for
-    /// a full debugging session (see docs/wifi-connect-issue.md).
-    pub fn scan_networks(&mut self) -> Result<Vec<AccessPointInfo>> {
-        self.wifi
-            .set_configuration(&Configuration::Client(ClientConfiguration::default()))
-            .context("failed to set STA mode for scan")?;
-        if !self.wifi.is_started().unwrap_or(false) {
-            self.wifi
-                .start()
-                .context("failed to start Wi-Fi for scan")?;
-        }
-        let mut aps = self.wifi.scan().context("Wi-Fi scan failed")?;
-        watchdog::feed();
-        aps.sort_by_key(|ap| std::cmp::Reverse(ap.signal_strength));
-        aps.dedup_by(|a, b| a.ssid == b.ssid);
-        Ok(aps)
-    }
 }
 
 /// Cleanly restarts the device so the next boot's Wi-Fi connect is a fresh
@@ -277,7 +255,7 @@ pub fn restart_for_fresh_wifi_session() -> ! {
     // Best-effort: give any in-flight log/serial output a moment to flush
     // before sleep. Not load-bearing for correctness, just politeness.
     thread::sleep(Duration::from_millis(300));
-    crate::power::enter_deep_sleep_with_wakeups(Some(Duration::from_millis(100)))
+    crate::power::restart_via_deep_sleep(Duration::from_millis(100))
 }
 
 /// Starts the SNTP client, waits for the first sync and pushes the obtained

@@ -24,8 +24,7 @@ use crate::wifi;
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Command {
     /// Configure Wi-Fi credentials. Will attempt to connect to verify before
-    /// saving to NVS, matching the on-device provisioning wizard's
-    /// verify-before-save philosophy - we only save credentials we know work.
+    /// saving to NVS - only credentials we know work end up persisted.
     SetWifi { ssid: String, password: String },
 
     /// Configure the server URL and authentication token for syncing alarms
@@ -118,9 +117,8 @@ pub fn dispatch(
             }
 
             // Attempt to connect and verify the credentials work before saving.
-            // This matches `provision.rs`'s philosophy: only save credentials we
-            // know are valid. If the connection fails, return an error without
-            // saving to NVS.
+            // Only credentials we know are valid end up in NVS; if the
+            // connection fails, return an error without persisting.
             match wifi_mgr.connect(&creds) {
                 Ok(()) => {
                     // Connection succeeded; disconnect (we're not keeping a
@@ -158,6 +156,11 @@ pub fn dispatch(
             };
             match counters.save_device_config(&cfg) {
                 Ok(()) => {
+                    if let Err(err) = counters.clear_sync_etag() {
+                        log::warn!(
+                            "Server config saved but old sync ETag could not be cleared: {err}"
+                        );
+                    }
                     log::info!("USB control: server config saved");
                     Reply::Ok
                 }
@@ -197,10 +200,6 @@ pub fn dispatch(
                     log::info!(
                         "USB control sync completed: {alarm_count} alarms, {todo_count} todos"
                     );
-                    Reply::Ok
-                }
-                Ok(sync::SyncOutcome::NotModified) => {
-                    log::info!("USB control sync: no changes on server");
                     Reply::Ok
                 }
                 Err(err) => {
