@@ -81,6 +81,12 @@ pub fn enter_deep_sleep_with_wakeups(resync_interval: Option<std::time::Duration
 /// wakeup. Unlike normal sleep this deliberately excludes ENTER and RTC_INT:
 /// an already-low alarm line must not turn an internal Wi-Fi recovery reboot
 /// into a false alarm wake.
+///
+/// Currently only reachable via `wifi::restart_for_fresh_wifi_session`,
+/// which has no active callers since the Wi-Fi second-connect crash was
+/// fixed by removing the pre-connect scan - kept as an emergency escape
+/// hatch.
+#[allow(dead_code)]
 pub fn restart_via_deep_sleep(delay: std::time::Duration) -> ! {
     let ret = unsafe { esp_sleep_enable_timer_wakeup(delay.as_micros() as u64) };
     if ret != 0 {

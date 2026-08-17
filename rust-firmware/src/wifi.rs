@@ -23,52 +23,40 @@ const NTP_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 /// thread `&mut WifiManager` everywhere Wi-Fi is needed - boot-time sync,
 /// the on-device setup wizard, and `sync::sync_now`.
 ///
-/// **A given boot session may only successfully `connect()` once.** This
-/// was originally a design where each caller created its own
-/// `EspWifi::new(unsafe { Peripherals::steal() }.modem, ...)` and dropped
-/// it when done; that crashed on a second connect
+/// **History of the "one connect per boot" limitation.** This driver was
+/// long believed to allow only one successful `connect()` per boot session.
+/// The original design had each caller create its own
+/// `EspWifi::new(unsafe { Peripherals::steal() }.modem, ...)` and drop it
+/// when done; that crashed on a second connect
 /// (`Guru Meditation Error: InstrFetchProhibited`). Switching to this one
 /// shared instance (avoiding a second `esp_wifi_init`) still crashed with
 /// the same signature on a second `esp_wifi_start()` after
 /// `esp_wifi_stop()`. Removing `stop()` from `disconnect()` (so `start()`
 /// is only ever called once) *still* crashed, this time with a different
 /// signature (`Unhandled debug exception`, `BREAK instr`) partway through
-/// the second connection's lifecycle. All three variants reproduced
-/// reliably on real hardware, including with over a minute between the
-/// first disconnect and the second connect attempt (ruling out an
-/// async-teardown timing race). This matches a known, unresolved class of
-/// upstream bugs - see e.g. espressif/esp-idf#7579 (netif rx-callback race
-/// on STA restart), espressif/esp-idf#11171 (`esp_wifi_stop()` doesn't
-/// fully quiesce the driver), and esp-rs/esp-idf-svc#503 (reusing one
-/// `EspWifi` for a second `connect()` panics in the driver's own state
-/// machine) - none with a confirmed fix in this ESP-IDF/esp-idf-svc
-/// version.
+/// the second connection's lifecycle. The crashes matched known upstream
+/// issues - espressif/esp-idf#7579 (netif rx-callback race on STA restart),
+/// espressif/esp-idf#11171 (`esp_wifi_stop()` doesn't fully quiesce the
+/// driver), esp-rs/esp-idf-svc#503 (reusing one `EspWifi` panics in the
+/// wrapper's state machine) - and the only workaround found was a full
+/// deep-sleep restart between uses (`restart_for_fresh_wifi_session`).
 ///
-/// `connect`/`disconnect` below call raw `esp_wifi_connect()`/
-/// `esp_wifi_disconnect()` FFI directly rather than going through
-/// `EspWifi`'s own `connect()`/`is_connected()`, on the theory that the
-/// esp-idf-svc#503 panic meant the crash was specific to the Rust
-/// wrapper's own event-driven status tracking. **That theory was tested
-/// and disproved**: a real second connect via the raw calls crashes
-/// identically (same PC address, `Unhandled debug exception` at
-/// `0x4037e864`) with or without the wrapper involved, so this is a
-/// lower-level ESP-IDF/hardware issue, not an esp-idf-svc-specific one.
-/// (github.com/qiujun8023/slate, a working C++ reference firmware for
-/// this exact hardware, *does* reconnect repeatedly via these same raw
-/// calls without crashing - but it does so synchronously from inside its
-/// `WIFI_EVENT_STA_DISCONNECTED` event handler, immediately on
-/// disconnect, not from arbitrary application code potentially much
-/// later; that context/timing difference is the leading remaining
-/// hypothesis for why theirs works and this doesn't, but reproducing it
-/// would mean restructuring this module around the event loop rather
-/// than synchronous calls, which hasn't been attempted.) The raw FFI
-/// calls are kept anyway since they're no worse than the wrapper and
-/// match Slate's proven-working low-level sequence.
+/// **Root cause found: the manual scan.** The old `connect()` ran a
+/// blocking `esp_wifi_scan_start()` before every connection. That flips the
+/// WiFi state machine into "scanning" (and the esp-idf-svc wrapper's
+/// `status.scan = Started` flag) which a subsequent `esp_wifi_connect()` on
+/// an already-started driver did not cleanly recover from. The scan was
+/// only ever diagnostic - credentials always come from the desktop's
+/// `SetWifi` command, and `esp_wifi_connect()` connects to the configured
+/// SSID directly - so it has been removed. **Multiple connections per boot
+/// now work reliably** (verified on hardware: three consecutive syncs in
+/// one boot session all connected and completed). The raw FFI calls
+/// (`esp_wifi_connect()`/`esp_wifi_disconnect()`) are kept over
+/// `EspWifi`'s own methods because the wrapper's event-driven status
+/// tracking still panics on reuse (esp-idf-svc#503).
 ///
-/// The only way found to reliably get a *working* second Wi-Fi connection
-/// is a full software reboot between uses, so every connect attempt is
-/// the guaranteed-safe first one of its boot session - see
-/// `used`/`restart_for_fresh_wifi_session`.
+/// `used`/`restart_for_fresh_wifi_session` are retained for compatibility
+/// and as a fallback, but no caller relies on the restart anymore.
 pub struct WifiManager {
     wifi: EspWifi<'static>,
     used: bool,
@@ -88,11 +76,10 @@ impl WifiManager {
         Ok(Self { wifi, used: false })
     }
 
-    /// Whether `connect()` has already succeeded once this boot session.
-    /// Every caller other than the very first boot-time connect must check
-    /// this before calling `connect()` again - see the struct doc comment
-    /// - and call `restart_for_fresh_wifi_session()` instead if it's
-    /// `true`.
+    /// Whether `connect()` has already succeeded at least once this boot
+    /// session. Purely informational now that multiple connects are safe -
+    /// callers may log it for diagnostics but must not skip `connect()` on
+    /// its account.
     pub fn used(&self) -> bool {
         self.used
     }
@@ -134,18 +121,14 @@ impl WifiManager {
             self.wifi.start().context("failed to start Wi-Fi")?;
         }
 
-        // Manual scan before connecting. If this finds APs but the internal
-        // connect scan does not, the radio path is fine and the problem is in
-        // the connect-time scan/filter.
-        match self.wifi.scan() {
-            Ok(aps) => {
-                log::info!("manual scan: {} APs", aps.len());
-                for ap in aps.iter() {
-                    log::info!("  {} ch{} rssi {}", ap.ssid, ap.channel, ap.signal_strength);
-                }
-            }
-            Err(err) => log::warn!("manual scan failed: {err:?}"),
-        }
+        // No scan before connecting. Credentials always come from the
+        // desktop's `SetWifi` command, so the target SSID is known and
+        // `esp_wifi_connect()` connects to the configured SSID directly.
+        // A manual `esp_wifi_scan_start()` here was the second-connection
+        // crash trigger: it flips the WiFi state machine into "scanning"
+        // (and the esp-idf-svc wrapper's `status.scan = Started` flag) that
+        // a subsequent `esp_wifi_connect()` on an already-started driver
+        // didn't cleanly recover from - see the struct doc comment.
         watchdog::feed();
 
         // Raw FFI from here, bypassing `EspWifi`'s own `connect()`/
@@ -228,26 +211,25 @@ impl WifiManager {
     }
 }
 
-/// Cleanly restarts the device so the next boot's Wi-Fi connect is a fresh
-/// session's first (and therefore safe - see `WifiManager`'s doc comment).
-/// Call this instead of `WifiManager::connect()` whenever `used()` is
-/// already `true`. Never returns.
+/// Legacy fallback that restarts the device for a fresh Wi-Fi session.
+/// Retained for compatibility and as an emergency escape hatch if a
+/// second connect ever misbehaves on hardware again, but **no caller
+/// depends on this anymore** - the manual scan that caused second-connect
+/// crashes has been removed (see `WifiManager`'s doc comment), so multiple
+/// connects per boot work. Never returns.
 ///
 /// Goes through `power::enter_deep_sleep_with_wakeups` (a near-immediate
 /// timer wake) rather than `esp_idf_svc::sys::esp_restart()`. The obvious
-/// choice - `esp_restart()` - turned out to hit the *same* crash class
-/// this function exists to avoid: even with the Wi-Fi driver never
-/// reconnected, calling it right after a Wi-Fi session had been used
-/// still crashed (`Guru Meditation Error: Cache error` at
-/// `_UserExceptionVector`), reproduced on real hardware after ruling out
-/// several other suspects (thread core affinity included). `esp_restart()`
-/// evidently performs its own internal Wi-Fi-aware teardown that hits the
-/// same unresolved upstream instability - see `WifiManager`'s doc comment
-/// for the full saga. Deep sleep, by contrast, has been exercised
-/// repeatedly and reliably in this project specifically *after* an
-/// already-used Wi-Fi session (every DOWN-hold-3s sleep following a
-/// boot-time NTP sync), so it's the proven path here even though a
-/// power-cycle is a heavier hammer than a soft reset.
+/// choice - `esp_restart()` - hit the same crash class this function exists
+/// to avoid: even with the Wi-Fi driver never reconnected, calling it right
+/// after a Wi-Fi session had been used crashed (`Guru Meditation Error:
+/// Cache error` at `_UserExceptionVector`), reproduced on real hardware.
+/// `esp_restart()` evidently performs its own internal Wi-Fi-aware teardown
+/// that hits the same upstream instability. Deep sleep, by contrast, has
+/// been exercised repeatedly and reliably in this project *after* an
+/// already-used Wi-Fi session, so it's the proven path if a restart is ever
+/// needed.
+#[allow(dead_code)]
 pub fn restart_for_fresh_wifi_session() -> ! {
     log::warn!(
         "Wi-Fi already used this boot session; power-cycling for a fresh (safe) session instead of reconnecting in-process"

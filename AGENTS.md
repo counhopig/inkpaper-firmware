@@ -24,7 +24,7 @@ inkpaper/
 | GPIO/电源轨/EPD 数据格式 | `docs/note4-hardware.md` | 板级硬件权威来源 |
 | USB/BLE 命令协议 | `docs/control-protocol.md` | 与 inkpaper-desktop 的契约 |
 | HTTP 同步协议 | `docs/sync-api.md` | 与 inkpaper-server 的契约 |
-| Wi-Fi 二次连接崩溃调查 | `rust-firmware/src/wifi.rs`（`WifiManager` 文档注释） | 绕过方案的完整推理链，代码级摘要见 `rust-firmware/AGENTS.md` |
+| Wi-Fi 连接历史与 scan 元凶调查 | `rust-firmware/src/wifi.rs`（`WifiManager` 文档注释） | 二次连接崩溃的完整推理链与最终根因（已解决），代码级摘要见 `rust-firmware/AGENTS.md` |
 | 实机验证状态/跨仓库进度 | `docs/project-status.md` | 含"尚未实机验证"清单 |
 
 ## CODE MAP
@@ -51,7 +51,7 @@ inkpaper/
 红线（违反=变砖或必崩；代码锚点见 `rust-firmware/AGENTS.md`）：
 1. **NOTE4 与 NOTE4C 不可混刷**——硬件/波形/固件不兼容；恢复只用本机自己的备份。
 2. **Flash 永远 DIO，禁止 QIO**——QIO 镜像在 app 启动前看门狗复位循环。
-3. **一次开机只允许成功连 Wi-Fi 一次**；进程内第二次连接必崩（ESP-IDF 已知未修 bug 类别，espressif/esp-idf#7579）。重启只能走深睡+~100ms 定时唤醒路径，**严禁 `esp_restart()`**（同一崩溃类别）。
+3. **Wi-Fi 同 boot 可多次连接**——曾以为"一次开机只允许成功连 Wi-Fi 一次"（二次连接必崩），2026-08-17 查明元凶是每次连接前的阻塞 `esp_wifi_scan_start()`（凭据来自 desktop `SetWifi`，扫描纯属多余），移除后同 boot 连续多次 sync 实测全部成功。**永不调 `esp_wifi_stop()`**（stop→start 即崩溃触发点，`start()` 每进程一次）；如需重启只能走深睡+~100ms 定时唤醒路径，**严禁 `esp_restart()`**。详见 `rust-firmware/src/wifi.rs` 文档注释。
 4. **GPIO17 电源锁存**：boot 早期拉高 + 深睡期间 RTC GPIO hold——否则物理断电。
 5. `ssd2683_waveform.h` 与官方 zectrix_epd 组件**禁止删除/替换**；不用通用 SSD1683 序列。
 6. 永不提交：`sdkconfig`、`backups/*.bin`、`target/`、含设备凭据的日志。
@@ -74,5 +74,5 @@ espflash monitor --port /dev/ttyACM0     # 串口日志（唯一的"测试"手�
 
 ## NOTES
 - `rust-firmware/.cargo/config.toml` 含机器相关路径（`IDF_PATH=~/esp/esp-idf`、`LIBCLANG_PATH` 指向本机 espup esp-clang）——换机或换工具链版本需手改。
-- 已知未根本修复：Wi-Fi 二次连接崩溃（现为重启绕过）。触发 Sync Now 后设备自动重启一次是**预期行为**，不是故障。
+- 设备支持自动周期 sync（默认 60 分钟，设置菜单可改 1/5/10/30/60），失败会在下个周期重试；`esp_wifi_stop()` 与 `esp_restart()` 仍属红线，见红线 #3。
 - 尚未实机验证：闹钟响铃全流程、BLE 端到端配对——改相关代码后无法靠"编译通过"背书。

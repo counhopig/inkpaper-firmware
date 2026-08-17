@@ -8,6 +8,8 @@ const KEY_SERVER_URL: &str = "server_url";
 const KEY_AUTH_TOKEN: &str = "auth_token";
 const KEY_SYNC_ETAG: &str = "sync_etag";
 const KEY_TIMEZONE_OFFSET: &str = "timezone_min";
+const KEY_SYNC_INTERVAL_MIN: &str = "sync_interval_min";
+const KEY_LAST_SYNC_EPOCH: &str = "last_sync_epoch";
 
 /// Maximum length of the NVS strings used for Wi-Fi credentials.
 /// ESP32-S3 NVS limits a single string item to ~4000 bytes; 64 chars is
@@ -143,6 +145,59 @@ impl PersistedCounters {
             .remove(KEY_SYNC_ETAG)
             .map(|_| ())
             .map_err(|e| anyhow!("NVS remove({KEY_SYNC_ETAG}) failed: {e}"))
+    }
+
+    /// Automatic-sync interval in minutes. The device re-syncs with the
+    /// configured server every this many minutes while running on Home (see
+    /// `main.rs`'s periodic sync check). Defaults to 60 (1 hour).
+    pub fn sync_interval_minutes(&self) -> Result<u16> {
+        let mut buf = [0u8; 8];
+        let value = self
+            .nvs
+            .get_str(KEY_SYNC_INTERVAL_MIN, &mut buf)
+            .map_err(|e| anyhow!("NVS get_str({KEY_SYNC_INTERVAL_MIN}) failed: {e}"))?
+            .unwrap_or("60");
+        value
+            .parse::<u16>()
+            .map_err(|e| anyhow!("invalid stored sync interval '{value}': {e}"))
+    }
+
+    /// Sets the automatic-sync interval in minutes.
+    pub fn set_sync_interval_minutes(&self, minutes: u16) -> Result<()> {
+        if !(1..=1440).contains(&minutes) {
+            return Err(anyhow!("sync interval must be between 1 and 1440 minutes"));
+        }
+        self.nvs
+            .set_str(KEY_SYNC_INTERVAL_MIN, &minutes.to_string())
+            .map(|_| ())
+            .map_err(|e| anyhow!("NVS set_str({KEY_SYNC_INTERVAL_MIN}) failed: {e}"))
+    }
+
+    /// Unix seconds of the last successful sync, if any. `main.rs` uses this
+    /// with `sync_interval_minutes` to decide when to trigger the next
+    /// automatic sync.
+    pub fn last_sync_epoch(&self) -> Result<Option<u64>> {
+        let mut buf = [0u8; 20];
+        match self
+            .nvs
+            .get_str(KEY_LAST_SYNC_EPOCH, &mut buf)
+            .map_err(|e| anyhow!("NVS get_str({KEY_LAST_SYNC_EPOCH}) failed: {e}"))?
+        {
+            Some(value) => value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|e| anyhow!("invalid stored last-sync epoch '{value}': {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Records the time of a successful sync so the periodic checker knows
+    /// how long it has been since the last one.
+    pub fn set_last_sync_epoch(&self, epoch: u64) -> Result<()> {
+        self.nvs
+            .set_str(KEY_LAST_SYNC_EPOCH, &epoch.to_string())
+            .map(|_| ())
+            .map_err(|e| anyhow!("NVS set_str({KEY_LAST_SYNC_EPOCH}) failed: {e}"))
     }
 
     pub fn timezone_offset_minutes(&self) -> Result<i16> {

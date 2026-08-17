@@ -214,7 +214,9 @@ fn main() -> Result<()> {
     // time into the PCF8563 so it keeps ticking while the device sleeps.
     // Failure to connect or sync only logs a warning; the rest of the UI
     // keeps working regardless. A healthy battery-backed RTC needs no boot
-    // network traffic, leaving the one safe Wi-Fi session for Sync Now.
+    // network traffic; periodic auto-sync (see the main loop below) brings
+    // Wi-Fi up on its own schedule, and multiple connects per boot are safe
+    // (see `wifi::WifiManager`).
     if !needs_wifi_sync {
         log::info!("RTC is healthy; skipping boot-time Wi-Fi/NTP resync");
     } else {
@@ -256,6 +258,7 @@ fn main() -> Result<()> {
 
     let mut status_tick = 0u32;
     let mut clock_tick = 0u32;
+    let mut auto_sync_tick = 0u32;
     let mut ble_control: Option<ble_control::BleControl> = None;
     loop {
         watchdog::feed();
@@ -265,6 +268,23 @@ fn main() -> Result<()> {
             if let Err(err) = report_power_state(&mut board) {
                 log::warn!("Power status probe failed: {err}");
             }
+        }
+
+        // Periodic auto-sync check every 30 s (1500 × 20 ms). The check
+        // itself is cheap (two NVS reads); the actual sync only runs when
+        // the elapsed time since the last one exceeds the configured
+        // interval (see `screens.rs`'s SYNC INTERVAL setting).
+        auto_sync_tick += 1;
+        if auto_sync_tick >= 1500 {
+            auto_sync_tick = 0;
+            maybe_auto_sync(
+                &mut board,
+                &counters,
+                &mut wifi_mgr,
+                &alarm_store,
+                &todo_store,
+                clock.as_ref(),
+            );
         }
 
         let mut dirty: Vec<Rect> = Vec::new();
@@ -293,6 +313,7 @@ fn main() -> Result<()> {
 
         // Poll USB console for incoming commands, dispatch them, and send replies.
         if let Some(cmd) = usb_console.poll_command() {
+            let needs_full_redraw = matches!(cmd, control::Command::SyncNow);
             let reply = control::dispatch(
                 cmd,
                 &mut board,
@@ -302,12 +323,16 @@ fn main() -> Result<()> {
                 &todo_store,
                 clock.as_ref(),
             );
+            if needs_full_redraw && matches!(reply, control::Reply::Ok) {
+                dirty.push(FULL_SCREEN_RECT);
+            }
             usb_console::write_reply(&reply);
         }
 
         // Poll BLE for incoming commands (if BLE is active), dispatch them, and send replies.
         if let Some(ble) = &ble_control {
             if let Some(cmd) = ble.poll_command() {
+                let needs_full_redraw = matches!(cmd, control::Command::SyncNow);
                 let reply = control::dispatch(
                     cmd,
                     &mut board,
@@ -317,6 +342,9 @@ fn main() -> Result<()> {
                     &todo_store,
                     clock.as_ref(),
                 );
+                if needs_full_redraw && matches!(reply, control::Reply::Ok) {
+                    dirty.push(FULL_SCREEN_RECT);
+                }
                 ble.write_reply(&reply);
             }
         }
@@ -413,6 +441,67 @@ fn render_home_now(
     board
         .display
         .render_home(clock, next_alarm.as_deref(), todo_pending);
+}
+
+/// Periodic auto-sync entry point, called every ~30 s from the main loop.
+/// Runs a full sync (via `sync::sync_now`, which connects Wi-Fi on demand -
+/// safe to do repeatedly now that `wifi::WifiManager::connect` no longer
+/// scans) when the elapsed time since the last successful sync exceeds the
+/// configured interval. Requires the device to be on Home (the main loop
+/// blocks inside any menu screen, so this only fires while idle), and
+/// requires server + Wi-Fi configuration to exist. Failures are logged and
+/// retried on the next check.
+fn maybe_auto_sync(
+    board: &mut Note4Board,
+    counters: &PersistedCounters,
+    wifi_mgr: &mut wifi::WifiManager,
+    alarm_store: &AlarmStore,
+    todo_store: &TodoStore,
+    clock: Option<&DateTime>,
+) {
+    let Some(now) = clock else {
+        return;
+    };
+    let server_configured = counters
+        .device_config()
+        .map(|cfg| cfg.is_some())
+        .unwrap_or(false);
+    if !server_configured {
+        return;
+    }
+    let wifi_configured = counters
+        .wifi_creds()
+        .map(|creds| creds.is_some())
+        .unwrap_or(false);
+    if !wifi_configured {
+        return;
+    }
+    let interval = counters.sync_interval_minutes().unwrap_or(60) as u64;
+    let due = match counters.last_sync_epoch().unwrap_or(None) {
+        Some(last) => now.to_unix().saturating_sub(last) >= interval * 60,
+        None => true,
+    };
+    if !due {
+        return;
+    }
+    log::info!("Automatic sync due (interval {interval} min); syncing");
+    match sync::sync_now(
+        counters,
+        wifi_mgr,
+        alarm_store,
+        todo_store,
+        &mut board.rtc,
+        now,
+    ) {
+        Ok(_) => {
+            log::info!("Automatic periodic sync completed");
+            render_home_now(board, alarm_store, todo_store, clock);
+            if let Err(err) = board.display.refresh_partial(FULL_SCREEN_RECT) {
+                log::warn!("Failed to refresh display after auto sync: {err}");
+            }
+        }
+        Err(err) => log::warn!("Automatic periodic sync failed: {err}"),
+    }
 }
 
 fn report_power_state(board: &mut Note4Board) -> Result<()> {

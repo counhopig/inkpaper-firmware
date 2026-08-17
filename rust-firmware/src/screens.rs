@@ -28,6 +28,7 @@ pub fn open_menu(
 ) {
     let items = [
         "SYNC NOW".to_string(),
+        "SYNC INTERVAL".to_string(),
         "BLE PAIRING".to_string(),
         "SLEEP".to_string(),
     ];
@@ -42,7 +43,8 @@ pub fn open_menu(
         };
         match index {
             0 => sync_now_screen(board, counters, wifi_mgr, alarm_store, todo_store, now),
-            1 => ble_pairing_screen(
+            1 => sync_interval_screen(board, counters),
+            2 => ble_pairing_screen(
                 board,
                 counters,
                 wifi_mgr,
@@ -51,7 +53,7 @@ pub fn open_menu(
                 now,
                 ble_control,
             ),
-            2 => {
+            3 => {
                 show_message(
                     board,
                     "SLEEP",
@@ -62,6 +64,41 @@ pub fn open_menu(
             }
             _ => {}
         }
+    }
+}
+
+/// Pick the automatic sync interval from preset options (1/5/10/30/60
+/// minutes). The device re-syncs with the configured server every this many
+/// minutes while idle on Home (see `main.rs`'s `maybe_auto_sync`).
+fn sync_interval_screen(board: &mut Note4Board, counters: &PersistedCounters) {
+    const OPTIONS: [(&str, u16); 5] = [
+        ("1 MIN", 1),
+        ("5 MIN", 5),
+        ("10 MIN", 10),
+        ("30 MIN", 30),
+        ("60 MIN", 60),
+    ];
+    let items: Vec<String> = OPTIONS.iter().map(|(label, _)| label.to_string()).collect();
+    let Some(index) = pick_from_list(
+        board,
+        "SYNC INTERVAL",
+        &items,
+        "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
+    ) else {
+        return;
+    };
+    let (_, minutes) = OPTIONS[index];
+    match counters.set_sync_interval_minutes(minutes) {
+        Ok(()) => {
+            log::info!("Sync interval set to {minutes} min");
+            show_message(
+                board,
+                "SYNC INTERVAL",
+                &[&format!("{minutes} MIN")],
+                std::time::Duration::from_secs(1),
+            );
+        }
+        Err(err) => log::warn!("Failed to save sync interval: {err}"),
     }
 }
 

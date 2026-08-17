@@ -99,32 +99,11 @@ pub fn dispatch(
         Command::SetWifi { ssid, password } => {
             let creds = WifiCreds { ssid, password };
 
-            // A second in-process Wi-Fi connect crashes (see
-            // `WifiManager`'s doc comment). Unlike `sync::sync_now`, there's
-            // no clean way to verify-then-reply-then-restart here (the
-            // restart happens before any reply could reach the client), so
-            // this path skips the usual verify-before-save step and just
-            // saves the credentials directly - the next boot's normal
-            // `needs_wifi_sync` connect attempt effectively verifies them
-            // instead. Documented in docs/control-protocol.md.
-            if wifi_mgr.used() {
-                return match counters.save_wifi_creds(&creds) {
-                    Ok(()) => {
-                        log::warn!(
-                            "USB control: Wi-Fi already used this session; saved '{}' unverified and restarting",
-                            creds.ssid
-                        );
-                        wifi::restart_for_fresh_wifi_session();
-                    }
-                    Err(err) => Reply::Error {
-                        message: format!("Failed to save credentials: {err}"),
-                    },
-                };
-            }
-
             // Attempt to connect and verify the credentials work before saving.
             // Only credentials we know are valid end up in NVS; if the
-            // connection fails, return an error without persisting.
+            // connection fails, return an error without persisting. Multiple
+            // connects per boot are safe now that `wifi::WifiManager::connect`
+            // no longer scans before connecting (see its doc comment).
             match wifi_mgr.connect(&creds) {
                 Ok(()) => {
                     // Connection succeeded; disconnect (we're not keeping a

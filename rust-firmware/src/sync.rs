@@ -214,17 +214,15 @@ pub fn sync_now(
         .ok_or_else(|| anyhow!("Server not configured; use SetServer first"))?;
     let etag = counters.sync_etag().ok().flatten();
 
+    // A second in-process Wi-Fi connect used to crash; the codebase once
+    // worked around it by deep-sleep restarting for a fresh session (see
+    // `wifi::WifiManager`'s doc comment for the full history). The manual
+    // `esp_wifi_scan_start()` that `connect()` ran before every connection
+    // turned out to be the trigger - credentials here always come from the
+    // desktop's `SetWifi` command, so that scan was never needed and has
+    // been removed. Multiple connects per boot now work; no restart needed.
     if wifi_mgr.used() {
-        // A second in-process Wi-Fi connect crashes even with raw
-        // `esp_wifi_connect()`/`esp_wifi_disconnect()` FFI calls, bypassing
-        // `EspWifi`'s own connect/status-tracking entirely (confirmed by
-        // deliberately testing a real second connect here: identical crash,
-        // same PC address, with or without the wrapper) - so this isn't an
-        // esp-idf-svc-specific bug, it's lower-level than that. Restart
-        // cleanly instead of attempting it; see `WifiManager`'s doc comment
-        // for the full investigation and why `restart_for_fresh_wifi_session`
-        // goes through deep sleep rather than `esp_restart()`.
-        wifi::restart_for_fresh_wifi_session();
+        log::warn!("Wi-Fi already used this boot session; attempting a second connect (scan-free)");
     }
 
     wifi_mgr
@@ -252,6 +250,13 @@ pub fn sync_now(
     {
         if let Err(err) = counters.save_sync_etag(new_etag) {
             log::warn!("Failed to save sync ETag: {err}");
+        }
+    }
+    // Record when this sync ran, so the periodic auto-sync checker
+    // (`main.rs`) knows how long it has been since the last one.
+    if outcome.is_ok() {
+        if let Err(err) = counters.set_last_sync_epoch(now.to_unix()) {
+            log::warn!("Failed to record last-sync time: {err}");
         }
     }
 

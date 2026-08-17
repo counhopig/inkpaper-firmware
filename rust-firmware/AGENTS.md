@@ -27,12 +27,14 @@
 
 ## ANTI-PATTERNS (code-enforced)
 根 AGENTS.md 的红线在本 crate 的具体执行点：
-- **Wi-Fi 三铁律**（`wifi.rs`）：① 每 boot 只允许一次成功 `connect()`——非首次调用方必须先查 `used()`，true 则走 `restart_for_fresh_wifi_session()`（守卫实例：`sync.rs:217`、`control.rs:110`）；② **永不调 `esp_wifi_stop()`**（stop→start 即崩溃触发点，`start()` 每进程一次）；③ 重启只用深睡路径（`power::restart_via_deep_sleep`，纯定时唤醒，无 ext1/RTC 闹钟），**不用 `esp_restart()`**。Wi-Fi 配置必须 `WIFI_STORAGE_RAM`。重启后 sync 不自动续跑，由调用方重试；设备端已无 Wi-Fi 配网向导，`SetWifi` 只能来自 USB/BLE。
+- **Wi-Fi 连接**（`wifi.rs`）：① **同一 boot 可多次 `connect()`**——曾长期以为每 boot 只能连一次（二次连接 `Guru Meditation`/`Unhandled debug exception` 崩溃），后查明元凶是每次连接前跑的阻塞 `esp_wifi_scan_start()`（凭据来自 desktop `SetWifi`，扫描纯属多余），已移除；实测同 boot 连续 3 次 sync 全部成功。raw FFI `esp_wifi_connect()`/`disconnect()` 保留（esp-idf-svc wrapper 的 status 追踪仍会在复用时报 #503 panic）。② **永不调 `esp_wifi_stop()`**（stop→start 即崩溃触发点，`start()` 每进程一次）。③ 如需重启只用深睡路径（`power::restart_via_deep_sleep`，纯定时唤醒，无 ext1/RTC 闹钟），**不用 `esp_restart()`**。`restart_for_fresh_wifi_session` 现为死代码（`#[allow(dead_code)]` 逃生舱）。Wi-Fi 配置必须 `WIFI_STORAGE_RAM`。设备端已无 Wi-Fi 配网向导，`SetWifi` 只能来自 USB/BLE。
+- **自动周期 sync**（`main.rs` `maybe_auto_sync`）：主循环每 ~30s 检查一次，距上次成功 sync 超过 `sync_interval_minutes`（NVS 默认 60，设置菜单 SYNC INTERVAL 可选 1/5/10/30/60）就调 `sync::sync_now`。检查仅在 Home 空闲时进行（菜单页阻塞主循环）；失败记日志、下次再试。手动 sync 与自动 sync 共用同一路径。
 - **BLE**（`ble_control.rs`）：NimBLE 回调线程**禁止碰 `Note4Board`**，只 push channel，dispatch 仅在主循环（L80-83）；`deinit_full()` 后每次 `start()` 必须显式 `BLEDevice::init()`（L55-58）。BLE 与 Wi-Fi 共享射频，永不同时开——BLE 只在配对页存活。
 - **RTC 闹钟**：只有一个硬件槽，多闹钟时必须总是写时间最近的那个（`alarms::next_due`，`rtc.rs:165-170`）；boot 时 `clear_alarm()` 清残留（`board.rs:92-94`）。
 - **上电时序**：GPIO42(AVDD) 拉高必须先于 I2C0 init（`board.rs:69-70, 87`）；唤醒后先 `release_power_latch_hold()` 再在 GPIO17 上建 PinDriver（`power.rs:33-36` → `board.rs:61`）。
 - **EPD**：4bpp 全刷后必须先做一次 1bpp 全刷才能恢复局刷；局刷前确认电源经 FFI 管理。
 - **闹钟/待办 `id` 在列表内不得冲突**（sync-api 契约）；命令只在 Home 主循环轮询，菜单页不响应。
+- **遥控状态变更必须触发主页重绘**（`main.rs:294-328`）：`CLOCK_RECT`（y=36..128）不覆盖 NEXT ALARM / OPEN TODOS 面板（y=139..233，`display.rs:48-77`）。`control::dispatch` 改写 NVS 后 NVS-渲染管道不会自动脏标——任何 USB/BLE 命令只要会改主页显示的数据（`SyncNow`、`clear_alarms`，及未来同类命令），必须在 `main` 轮询里 `dirty.push(FULL_SCREEN_RECT)`。命令在 dispatch 前用 `matches!` 抓 variant（`Command` 不是 `Copy`，dispatch 会 move），仅回复 `Reply::Ok` 时入栈；失败回复不浪费一次全刷。
 
 ## COMMANDS
 ```bash
