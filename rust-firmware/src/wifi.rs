@@ -84,6 +84,12 @@ impl WifiManager {
         self.used
     }
 
+    /// Whether the STA link is currently up (connected + netif running).
+    /// Reports `false` if the driver is not started or the query fails.
+    pub fn is_connected(&self) -> bool {
+        self.wifi.is_connected().unwrap_or(false)
+    }
+
     /// Connects to `creds`, waiting for the STA link and a DHCP lease
     /// (netif up) before returning. Leaves the driver connected - call
     /// `disconnect` when done, mirroring the previous per-call

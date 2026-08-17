@@ -59,6 +59,11 @@ pub enum Reply {
         wifi_configured: bool,
         server_configured: bool,
         wifi_connected: bool,
+        wifi_ssid: Option<String>,
+        wifi_has_password: bool,
+        server_url: Option<String>,
+        server_has_token: bool,
+        timezone_offset_minutes: i16,
     },
 
     /// Command failed.
@@ -207,14 +212,33 @@ pub fn dispatch(
                 .map(|opt| opt.is_some())
                 .unwrap_or(false);
 
-            // TODO: check live Wi-Fi connection state if readily available.
-            // For now, we just report static config, not current connection status.
-            let wifi_connected = false;
+            // Report live Wi-Fi connection state plus what is actually
+            // stored in NVS. Secrets (Wi-Fi password, server auth token) are
+            // never sent back to the client - only whether one is set.
+            let wifi_connected = wifi_mgr.is_connected();
+            let (wifi_ssid, wifi_has_password) = counters
+                .wifi_creds()
+                .ok()
+                .flatten()
+                .map(|creds| (Some(creds.ssid), !creds.password.is_empty()))
+                .unwrap_or((None, false));
+            let (server_url, server_has_token) = counters
+                .device_config()
+                .ok()
+                .flatten()
+                .map(|cfg| (Some(cfg.server_url), !cfg.auth_token.is_empty()))
+                .unwrap_or((None, false));
+            let timezone_offset_minutes = counters.timezone_offset_minutes().unwrap_or(0);
 
             Reply::Status {
                 wifi_configured,
                 server_configured,
                 wifi_connected,
+                wifi_ssid,
+                wifi_has_password,
+                server_url,
+                server_has_token,
+                timezone_offset_minutes,
             }
         }
 

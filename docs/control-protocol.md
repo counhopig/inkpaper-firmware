@@ -88,12 +88,14 @@ Query the device's current configuration state.
 - (No other fields.)
 
 **Behavior:**
-- Returns a snapshot of whether Wi-Fi and server credentials are configured.
-- Includes a flag for live Wi-Fi connection state if readily available
-  (current implementation: always `false` unless explicitly implemented).
+- Returns a snapshot of whether Wi-Fi and server credentials are configured,
+  the stored SSID / server URL / timezone, and live Wi-Fi connection state.
+- Secrets (Wi-Fi password, server auth token) are never sent back - only
+  booleans indicating whether one is set.
 
-**Reply:** `Status { wifi_configured, server_configured, wifi_connected }`
-(see Replies below).
+**Reply:** `Status { wifi_configured, server_configured, wifi_connected,
+wifi_ssid, wifi_has_password, server_url, server_has_token,
+timezone_offset_minutes }` (see Replies below).
 
 ---
 
@@ -138,7 +140,7 @@ the failure (e.g., "Connection verification failed: timeout").
 
 ---
 
-#### `{"status":"status","wifi_configured":BOOL,"server_configured":BOOL,"wifi_connected":BOOL}`
+#### `{"status":"status","wifi_configured":BOOL,"server_configured":BOOL,"wifi_connected":BOOL,"wifi_ssid":STR|NULL,"wifi_has_password":BOOL,"server_url":STR|NULL,"server_has_token":BOOL,"timezone_offset_minutes":INT}`
 
 Current device configuration (in reply to `get_status`).
 
@@ -147,7 +149,15 @@ Current device configuration (in reply to `get_status`).
 - **`wifi_configured`** (bool, required): `true` if Wi-Fi credentials are stored in NVS.
 - **`server_configured`** (bool, required): `true` if server URL + token are stored in NVS.
 - **`wifi_connected`** (bool, required): `true` if currently connected to a Wi-Fi network
-  (may be `false` if not actively checked; interpretation depends on implementation).
+  (live STA link state).
+- **`wifi_ssid`** (string or null, required): stored SSID, or `null` if not configured.
+- **`wifi_has_password`** (bool, required): whether a password is stored for the SSID.
+  The password itself is never transmitted.
+- **`server_url`** (string or null, required): stored server sync URL, or `null` if not
+  configured.
+- **`server_has_token`** (bool, required): whether an auth token is stored. The token
+  itself is never transmitted.
+- **`timezone_offset_minutes`** (int, required): stored UTC offset in minutes (`0` if unset).
 
 ---
 
@@ -195,7 +205,7 @@ reader.
 
 # PC queries device status
 >>IP {"cmd":"get_status"}
-<<IP {"status":"status","wifi_configured":true,"server_configured":false,"wifi_connected":false}
+<<IP {"status":"status","wifi_configured":true,"server_configured":true,"wifi_connected":false,"wifi_ssid":"MyNet","wifi_has_password":true,"server_url":"http://192.168.31.29:8080/api/sync","server_has_token":true,"timezone_offset_minutes":480}
 ```
 
 ---
@@ -234,7 +244,7 @@ notifications are already message-delimited at the link layer).
    below - commands aren't dispatched while any menu screen is showing),
    the device processes the command and sends a reply via notification:
    ```
-   {"status":"status","wifi_configured":true,"server_configured":false,"wifi_connected":false}
+   {"status":"status","wifi_configured":true,"server_configured":true,"wifi_connected":false,"wifi_ssid":"MyNet","wifi_has_password":true,"server_url":"http://192.168.31.29:8080/api/sync","server_has_token":true,"timezone_offset_minutes":480}
    ```
 
 ### Lifecycle
@@ -288,8 +298,6 @@ command execution, so a hung sync will eventually reboot the device.
 
 - Six commands are implemented: `set_wifi`, `set_server`, `sync_now`,
   `get_status`, `clear_alarms`, and `set_timezone`.
-- `wifi_connected` flag in `get_status` always returns `false` (live Wi-Fi state
-  checking is not yet wired in).
 - No rate limiting or command queueing; commands are dispatched as they arrive.
 - **Commands are only polled from the Home screen's main loop.** `UsbConsole`
   has no dedicated reader thread or queue - the main loop calls
