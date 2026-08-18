@@ -257,10 +257,11 @@ zectrix_epd_power_off
 ### 存储与电源状态
 
 - `storage.rs` 封装默认 NVS 分区（`partitions.csv` 中已声明 `nvs` 24 KiB 分区），命名空间 `inkpaper`。`PersistedCounters`（历史上从按键计数持久化演变而来，名字沿用了下来）现在存 `wifi_ssid` / `wifi_pass` / `server_url` / `auth_token` / `sync_etag` / `timezone_min` 六个键，`open()` 调用 `EspDefaultNvsPartition::take()` 自动初始化 NVS flash。`alarms.rs`/`todos.rs` 的 `AlarmStore`/`TodoStore` 各自持有同一 NVS 分区的另外的命名空间，存整份 JSON blob 而非分字段键。
-- `board.rs::battery_millivolts()` 走 ESP-IDF 5.x 的 ADC oneshot API：`AdcDriver::new(peripherals.adc1)` 持久化持有 ADC 单元，每次读电时 `Peripherals::steal()` 取出 `GPIO4`（ESP32-S3 上即 ADC1 CH3），临时构造 `AdcChannelDriver::new(&self.adc, gpio4, &BATTERY_ADC_CHANNEL_CONFIG)`。因为 `Note4Board` 全部字段都是 `'static`，把 channel 直接放进 board 会触发借用冲突，所以采用「每次重建 channel」的策略；返回值为 ESP-IDF mV × 2（板载 1:2 分压），并被 `u16::MAX` 钳制。
-- `main.rs` 主循环每 `STATUS_REPORT_INTERVAL_POLLS`（50 轮 ≈ 1 s）调用一次 `report_power_state()`，打印 `Power state: charging=… charge_done=… vbat_mV=…`；每 `CLOCK_POLL_INTERVAL_POLLS`（60 轮 ≈ 1.2 s）重读一次 PCF8563，秒/分/时变化才标记 `CLOCK_RECT` 为脏区触发局刷，避免每轮都重绘。
-- 充电状态引脚极性：`CHRG_L = GPIO2`，低电平表示正在充电；`STDBY_H = GPIO1`，高电平表示充满。两条信号都在 `board.charging_state()` 中返回，1 s 周期打印一次。
-- `sdkconfig.defaults` 已显式启用 `CONFIG_NVS_ENABLED=y` 与 `CONFIG_ADC_ONESHOT_ENABLED=y`。后续若启用 curve-fitting ADC 校准（ESP32-S3 上以 eFuse 三点拟合），需要再追加 `CONFIG_ADC_CAL_EFUSE_TP_FIT_SUPPORTED=y` 并把 `AdcChannelConfig { calibration: Calibration::Curve, .. }` 写进 `BATTERY_ADC_CHANNEL_CONFIG`。
+- `board.rs::battery_millivolts()` 走 ESP-IDF 5.x 的 ADC oneshot API：`AdcDriver::new(peripherals.adc1)` 持久化持有 ADC 单元，每次读电时 `Peripherals::steal()` 取出 `GPIO4`（ESP32-S3 上即 ADC1 CH3），临时构造 `AdcChannelDriver::new(&self.adc, gpio4, &BATTERY_ADC_CHANNEL_CONFIG)`。因为 `Note4Board` 全部字段都是 `'static`，把 channel 直接放进 board 会触发借用冲突，所以采用「每次重建 channel」的策略；返回值为 ESP-IDF mV × 2（板载 1:2 分压），并被 `u16::MAX` 钳制。`BATTERY_ADC_CHANNEL_CONFIG` 启用了 `Calibration::Curve`（eFuse 三点拟合，与官方 demo 的 `adc_cali_curve_fitting` 一致），并对 `BATTERY_ADC_SAMPLES = 10` 次读数取平均以抑制抖动。
+- `main.rs` 主循环每 `STATUS_REPORT_INTERVAL_POLLS`（50 轮 ≈ 1 s）调用一次 `report_power_state()`，打印 `Power state: power_present=… charging=… full=… vbat_mV=… (..%)`；每 `CLOCK_POLL_INTERVAL_POLLS`（60 轮 ≈ 1.2 s）重读一次 PCF8563，秒/分/时变化才标记 `CLOCK_RECT` 为脏区触发局刷，避免每轮都重绘。
+- 充电状态由 `board.rs` 的 `ChargeStatus` 状态机（移植自官方 demo `charge_status.cc`，简化去抖版）判定，每 tick ≈ 1 s，稳定需连续 2 tick：`power_present`（任一状态线活跃）、`charging`（`CHRG_L = GPIO2` 低且未满）、`full`（`STDBY_H = GPIO1` 高）。`report_power_state` 调 `charging_state()` 推进状态机；渲染路径只读 `charge_snapshot()`，避免不同调用频率破坏去抖。实机确认：充满时插着电表现为 `power_present=true charging=false full=true`（充电 IC 已停止充电，`charging=false` 是真实状态而非缺陷）。
+- `sdkconfig.defaults` 已显式启用 `CONFIG_NVS_ENABLED=y` 与 `CONFIG_ADC_ONESHOT_ENABLED=y`；ADC eFuse 曲线校准已通过 `Calibration::Curve` 启用，无需额外 config。
+- 电量百分比 `battery_percent_from_mv` 采用官方 demo 的二次多项式 `(-mv² + 9016·mv - 19189000)/10000`（0% ≈ 3444 mV，100% ≈ 4200 mV），比旧的 3300–4200 线性映射更贴合 LiPo 放电曲线（4.0 V 平台不再虚高）。
 
 ### PCF8563 RTC 与 I2C0
 
