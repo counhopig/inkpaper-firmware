@@ -1,0 +1,8 @@
+{
+  "rust-analyzer.cargo.extraEnv": {
+    "RUSTUP_TOOLCHAIN": "esp-ra",
+    "IDF_PATH": "/Users/tomzhu/esp/esp-idf",
+    "ESP_IDF_TOOLS_INSTALL_DIR": "fromenv",
+    "PATH": "/Users/tomzhu/esp/esp-idf/tools:/Users/tomzhu/.espressif/python_env/idf5.5_py3.9_env/bin:/Users/tomzhu/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  }
+}
