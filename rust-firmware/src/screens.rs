@@ -9,7 +9,9 @@ use crate::rtc::{is_leap, DateTime};
 use crate::storage::PersistedCounters;
 use crate::sync;
 use crate::todos::TodoStore;
-use crate::ui::{footer, header, pick_from_list, pick_number, poll_nav, show_message, tick, Nav};
+use crate::ui::{
+    draw_rows, footer, header, pick_from_list, pick_number, poll_nav, show_message, tick, Nav,
+};
 use crate::wifi::WifiManager;
 
 /// Entry point from Home's ENTER short-press: shows the top-level menu and
@@ -128,20 +130,23 @@ fn pick_navigation(board: &mut Note4Board) -> Option<usize> {
             // the current page remains visible to the right of the drawer.
             canvas.fill_rect(0, 0, 224, 300, false);
             canvas.fill_rect(216, 0, 2, 300, true);
-            canvas.draw_text_prop(20, 20, 1, "INKPAPER");
-            canvas.draw_text_prop(20, 40, 2, "GO TO");
-            canvas.fill_rect(20, 75, 178, 1, true);
+            // Same header convention as every content screen: title
+            // top-left at y=8, thin rule at y=29 - one consistent "top of
+            // a screen" landmark across the whole app instead of the
+            // drawer inventing its own layout.
+            canvas.draw_text_prop(16, 8, 1, "INKPAPER");
+            canvas.fill_rect(16, 29, 192, 1, true);
+            canvas.draw_text_prop(16, 40, 2, "GO TO");
 
             let mut y = 88usize;
             for (index, destination) in destinations.iter().enumerate() {
                 if index == selected {
                     canvas.stroke_rect(12, y, 194, 34, 2);
                     canvas.fill_rect(12, y, 5, 34, true);
-                    canvas.draw_text_prop(28, y + 8, 1, destination);
                 } else {
                     canvas.fill_rect(12, y, 194, 34, false);
-                    canvas.draw_text_prop(28, y + 8, 1, destination);
                 }
+                canvas.draw_text_prop(28, y + 8, 1, destination);
                 y += 38;
             }
             let _ = board.display.refresh_partial(Rect {
@@ -244,10 +249,23 @@ fn browse_page(
             match page {
                 Page::Home => {
                     let next_alarm = now.and_then(|dt| next_alarm_label(alarm_store, dt));
+                    let wifi_configured = counters
+                        .wifi_creds()
+                        .map(|creds| creds.is_some())
+                        .unwrap_or(false);
+                    let battery_percent = board
+                        .battery_millivolts()
+                        .ok()
+                        .map(crate::board::battery_percent_from_mv);
+                    let charging = board.charging_state().0;
                     board.display.render_home(
                         now,
-                        next_alarm.as_deref(),
+                        next_alarm.as_ref().map(|label| label.time.as_str()),
+                        next_alarm.as_ref().and_then(|label| label.date.as_deref()),
                         pending_todo_count(todo_store),
+                        wifi_configured,
+                        battery_percent,
+                        charging,
                     );
                 }
                 Page::Calendar => {
@@ -356,22 +374,25 @@ fn draw_month_grid(
     canvas.draw_text_prop(16, 38, 2, &title);
 
     const LABELS: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
-    const COL_WIDTH: usize = 52;
-    const ROW_HEIGHT: usize = 27;
+    const COL_WIDTH: usize = 53;
+    const ROW_HEIGHT: usize = 34;
     const ORIGIN_X: usize = 18;
     const ORIGIN_Y: usize = 75;
 
+    // Only "today" gets the boxed treatment - that's the one visual
+    // language the whole app uses for "you are here" (nav drawer
+    // selection, list selection, this). Weekend headers used to get the
+    // same stroke_rect box, which diluted that meaning without adding
+    // anything a plain label didn't already say.
     for (i, label) in LABELS.iter().enumerate() {
         let x = ORIGIN_X + i * COL_WIDTH;
-        if i == 0 || i == 6 {
-            canvas.stroke_rect(x.saturating_sub(4), ORIGIN_Y - 5, 34, 25, 1);
-            canvas.draw_text_prop(x, ORIGIN_Y, 1, label);
-        } else {
-            canvas.draw_text_prop(x, ORIGIN_Y, 1, label);
-        }
+        canvas.draw_text_prop(x, ORIGIN_Y, 1, label);
     }
     canvas.fill_rect(16, 99, 368, 1, true);
 
+    // Taller rows spread the (at most 6) week rows down to use the space
+    // down to a real bottom margin instead of leaving a large void below
+    // a short grid.
     let days_in_month = days_in_month(year, month);
     let mut col = weekday_of(year, month, 1) as usize;
     let mut row = 1usize;
@@ -383,12 +404,10 @@ fn draw_month_grid(
             .map(|dt| dt.year == year && dt.month == month && dt.day == day)
             .unwrap_or(false);
         if is_today {
-            canvas.stroke_rect(x.saturating_sub(6), y.saturating_sub(5), 34, 25, 2);
-            canvas.fill_rect(x.saturating_sub(6), y.saturating_sub(5), 4, 25, true);
-            canvas.draw_text_prop(x, y, 1, &text);
-        } else {
-            canvas.draw_text_prop(x, y, 1, &text);
+            canvas.stroke_rect(x.saturating_sub(6), y.saturating_sub(6), 34, 26, 2);
+            canvas.fill_rect(x.saturating_sub(6), y.saturating_sub(6), 4, 26, true);
         }
+        canvas.draw_text_prop(x, y, 1, &text);
         col += 1;
         if col > 6 {
             col = 0;
@@ -432,31 +451,6 @@ fn format_alarm_row(alarm: &StoredAlarm) -> String {
     format!("{mark} {when}")
 }
 
-fn render_rows(canvas: &mut crate::canvas::Canvas, title: &str, items: &[String], selected: usize) {
-    canvas.clear();
-    header(canvas, title);
-    let selected = selected.min(items.len().saturating_sub(1));
-    let first = selected.saturating_sub(crate::ui::MAX_LISTED_ITEMS - 1);
-    let mut y = 39usize;
-    for (index, item) in items
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(crate::ui::MAX_LISTED_ITEMS)
-    {
-        if index == selected {
-            canvas.stroke_rect(16, y, 368, 29, 2);
-            canvas.fill_rect(16, y, 5, 29, true);
-            canvas.draw_text_prop(30, y + 6, 1, ">");
-            canvas.draw_text_prop(50, y + 6, 1, item);
-        } else {
-            canvas.draw_text_prop(24, y + 6, 1, item);
-        }
-        y += 31;
-    }
-    footer(canvas, "UP/DOWN MOVE   ENTER OK   HOLD UP/DOWN PAGE");
-}
-
 fn render_alarm_page(board: &mut Note4Board, store: &AlarmStore, selected: usize) {
     let mut items: Vec<String> = store
         .load()
@@ -465,7 +459,9 @@ fn render_alarm_page(board: &mut Note4Board, store: &AlarmStore, selected: usize
         .map(format_alarm_row)
         .collect();
     items.push("+ ADD ALARM".to_string());
-    render_rows(board.display.canvas_mut(), "ALARMS", &items, selected);
+    let canvas = board.display.canvas_mut();
+    draw_rows(canvas, "ALARMS", &items, selected);
+    footer(canvas, "UP/DOWN MOVE   ENTER OK   HOLD UP/DOWN PAGE");
 }
 
 fn activate_alarm_row(
@@ -504,7 +500,9 @@ fn render_todo_page(board: &mut Note4Board, store: &TodoStore, selected: usize) 
             format!("{mark} {}", todo.text)
         })
         .collect();
-    render_rows(board.display.canvas_mut(), "TODOS", &items, selected);
+    let canvas = board.display.canvas_mut();
+    draw_rows(canvas, "TODOS", &items, selected);
+    footer(canvas, "UP/DOWN MOVE   ENTER OK   HOLD UP/DOWN PAGE");
 }
 
 fn activate_todo_row(store: &TodoStore, selected: usize) {
@@ -680,9 +678,18 @@ fn ble_pairing_screen(
     log::info!("BLE pairing screen: stopped advertising, reclaimed RAM");
 }
 
-/// Next enabled alarm's "HH:MM" (daily) or "HH:MM MM/DD" (one-shot) label,
-/// for the Home screen summary line.
-pub fn next_alarm_label(store: &AlarmStore, now: &DateTime) -> Option<String> {
+/// Next enabled alarm's time, plus its date if it's a one-shot alarm - for
+/// the Home screen summary card. Kept as two separate fields rather than
+/// one combined "HH:MM MM/DD" string so the card can always draw the time
+/// at a fixed, confident scale and the date (when present) as a smaller
+/// caption underneath, instead of having to shrink the whole value down to
+/// whatever scale fits the longer one-shot format.
+pub struct NextAlarmLabel {
+    pub time: String,
+    pub date: Option<String>,
+}
+
+pub fn next_alarm_label(store: &AlarmStore, now: &DateTime) -> Option<NextAlarmLabel> {
     let list = match store.load() {
         Ok(list) => list,
         Err(err) => {
@@ -690,13 +697,12 @@ pub fn next_alarm_label(store: &AlarmStore, now: &DateTime) -> Option<String> {
             return None;
         }
     };
-    alarms::next_due(&list, now).map(|alarm| match alarm.repeat {
-        Repeat::Daily => format!("{:02}:{:02}", alarm.hour, alarm.minute),
-        Repeat::Once { month, day, .. } => {
-            format!(
-                "{:02}:{:02} {:02}/{:02}",
-                alarm.hour, alarm.minute, month, day
-            )
-        }
+    alarms::next_due(&list, now).map(|alarm| {
+        let time = format!("{:02}:{:02}", alarm.hour, alarm.minute);
+        let date = match alarm.repeat {
+            Repeat::Daily => None,
+            Repeat::Once { month, day, .. } => Some(format!("{:02}/{:02}", month, day)),
+        };
+        NextAlarmLabel { time, date }
     })
 }

@@ -33,7 +33,7 @@ const I2C_FREQUENCY: Hertz = Hertz(400_000);
 
 pub struct Note4Board {
     _power_latch: PinDriver<'static, Output>,
-    _led: PinDriver<'static, Output>,
+    led: PinDriver<'static, Output>,
     _avdd_power: PinDriver<'static, Output>,
     pub key_enter: Button,
     pub key_up: Button,
@@ -63,6 +63,8 @@ impl Note4Board {
         let mut power_latch = PinDriver::output(pins.gpio17)?;
         power_latch.set_high()?;
 
+        // Starts high (matches the previous always-on behavior) until the
+        // first `update_charging_led` call in the main loop takes over.
         let mut led = PinDriver::output(pins.gpio3)?;
         led.set_high()?;
 
@@ -136,7 +138,7 @@ impl Note4Board {
 
         Ok(Self {
             _power_latch: power_latch,
-            _led: led,
+            led,
             _avdd_power: avdd_power,
             key_enter,
             key_up,
@@ -155,6 +157,24 @@ impl Note4Board {
         (self.charging.is_low(), self.charge_done.is_high())
     }
 
+    /// Drives the status LED (GPIO3) from the charge-management IC's own
+    /// pins: lit while actively charging, off once charge is complete or
+    /// when not on power at all. Previously the LED was set high once at
+    /// boot and never touched again (a leftover from before the UI
+    /// rewrite removed the old heartbeat-blink behavior); this gives it a
+    /// purpose again without adding a timer/blink pattern - a single
+    /// `PinDriver::set_high`/`set_low` call per `report_power_state` poll
+    /// is enough for a binary "charging or not" signal.
+    pub fn update_charging_led(&mut self) -> Result<()> {
+        let (charging, _charge_done) = self.charging_state();
+        if charging {
+            self.led.set_high()?;
+        } else {
+            self.led.set_low()?;
+        }
+        Ok(())
+    }
+
     /// Reads battery voltage via GPIO4 (ADC1 channel 3, on-board 1:2 divider)
     /// in mV. Returns the ESP-IDF mV reading for the ADC pin doubled, since
     /// the divider halves VBAT before the pin sees it. The DB_12 attenuation
@@ -170,5 +190,23 @@ impl Note4Board {
         let adc_mv = self.adc.read(&mut channel)?;
         let vbat_mv = (adc_mv as u32) * 2;
         Ok(vbat_mv.min(u16::MAX as u32) as u16)
+    }
+}
+
+/// Rough single-cell LiPo state-of-charge estimate from voltage, linear
+/// between the common 3300mV "empty" cutoff and 4200mV "full charge". Real
+/// LiPo discharge curves aren't linear, but there's no fuel-gauge IC on
+/// this board - this is a coarse glance indicator for the Home screen, not
+/// a precise one.
+pub fn battery_percent_from_mv(mv: u16) -> u8 {
+    const EMPTY_MV: u32 = 3300;
+    const FULL_MV: u32 = 4200;
+    let mv = mv as u32;
+    if mv <= EMPTY_MV {
+        0
+    } else if mv >= FULL_MV {
+        100
+    } else {
+        (((mv - EMPTY_MV) * 100) / (FULL_MV - EMPTY_MV)) as u8
     }
 }

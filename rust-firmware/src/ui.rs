@@ -70,9 +70,14 @@ pub fn show_message(board: &mut Note4Board, title: &str, lines: &[&str], pause: 
     let canvas = board.display.canvas_mut();
     canvas.clear();
     header(canvas, title);
-    let mut y = 62usize;
+    // Centered horizontally: these are one-off status toasts (sync
+    // result, sleep notice, BLE error), not scannable/left-reading
+    // content, so they read better as a centered caption than pinned to
+    // a fixed left margin.
+    let mut y = 110usize;
     for line in lines {
-        canvas.draw_text_prop(24, y, 2, line);
+        let width = Canvas::text_prop_width(line, 2);
+        canvas.draw_text_prop((400usize.saturating_sub(width)) / 2, y, 2, line);
         y += 38;
     }
     let _ = board.display.refresh_partial(Rect {
@@ -87,12 +92,40 @@ pub fn show_message(board: &mut Note4Board, title: &str, lines: &[&str], pause: 
 /// Rows visible at once. Longer lists scroll around the selection.
 pub const MAX_LISTED_ITEMS: usize = 7;
 
+const LIST_ROW_HEIGHT: usize = 31;
+/// Fixed left edge for row text, selected or not - previously the selected
+/// row's ">" chevron pushed its text 26px right of every other row's, so
+/// the reading edge jumped as the selection moved. The stroke/accent-bar
+/// chrome now lives entirely to the left of this column instead.
+const LIST_TEXT_X: usize = 50;
+
+/// Draws `items` under `title` as a scrolling row list, with the row at
+/// `selected` highlighted by an outlined rect + left accent bar. Shared by
+/// every screen that's "a list of things, pick or toggle one" - the
+/// settings menu (via `pick_from_list` below) and the Alarms/Todos pages
+/// (via `screens::render_alarm_page`/`render_todo_page`) - so they read as
+/// one consistent visual language instead of two subtly different ones.
+pub fn draw_rows(canvas: &mut Canvas, title: &str, items: &[String], selected: usize) {
+    canvas.clear();
+    header(canvas, title);
+    let selected = selected.min(items.len().saturating_sub(1));
+    let first = selected.saturating_sub(MAX_LISTED_ITEMS - 1);
+    let mut y = 39usize;
+    for (index, item) in items.iter().enumerate().skip(first).take(MAX_LISTED_ITEMS) {
+        if index == selected {
+            canvas.stroke_rect(16, y, 368, LIST_ROW_HEIGHT - 2, 2);
+            canvas.fill_rect(16, y, 5, LIST_ROW_HEIGHT - 2, true);
+        }
+        canvas.draw_text_prop(LIST_TEXT_X, y + 6, 1, item);
+        y += LIST_ROW_HEIGHT;
+    }
+}
+
 /// Blocking wheel-list picker: draws `items` (already formatted by the
-/// caller, e.g. with a "[x] " done marker baked in) under `title`,
-/// highlights the selected row with an outlined rect + side bar, and returns
-/// the chosen index on ENTER or `None` on hold-to-cancel. Shared by every
-/// screen that's "a list of things, pick one" - the menu, alarms list,
-/// todos list.
+/// caller, e.g. with a "[x] " done marker baked in) under `title` via
+/// [`draw_rows`], and returns the chosen index on ENTER or `None` on
+/// hold-to-cancel. Shared by every screen that's "a list of things, pick
+/// one" - the menu, alarms list, todos list.
 pub fn pick_from_list(
     board: &mut Note4Board,
     title: &str,
@@ -108,27 +141,7 @@ pub fn pick_from_list(
     loop {
         if needs_redraw {
             let canvas = board.display.canvas_mut();
-            canvas.clear();
-            header(canvas, title);
-            let first = if selected < MAX_LISTED_ITEMS {
-                0
-            } else {
-                selected + 1 - MAX_LISTED_ITEMS
-            };
-            let mut y = 39usize;
-            for (i, item) in items.iter().enumerate().skip(first).take(MAX_LISTED_ITEMS) {
-                if i == selected {
-                    canvas.stroke_rect(16, y, 368, 29, 2);
-                    canvas.fill_rect(16, y, 5, 29, true);
-                    canvas.draw_text_prop(30, y + 6, 1, ">");
-                    canvas.draw_text_prop(50, y + 6, 1, item);
-                } else {
-                    canvas.draw_text_prop(24, y + 6, 1, &format!("{:02}", i + 1));
-                    canvas.fill_rect(50, y + 14, 8, 1, true);
-                    canvas.draw_text_prop(68, y + 6, 1, item);
-                }
-                y += 31;
-            }
+            draw_rows(canvas, title, items, selected);
             footer(canvas, hint);
             if first_draw {
                 let _ = board.display.refresh_full();
@@ -187,10 +200,27 @@ pub fn pick_number(board: &mut Note4Board, title: &str, min: u8, max: u8) -> Opt
             let number_width = Canvas::text_prop_width(&label, 5);
             let box_width = number_width + 64;
             let box_x = 200usize.saturating_sub(box_width / 2);
-            canvas.draw_text_prop(156, 54, 1, "CHOOSE VALUE");
-            canvas.stroke_rect(box_x, 82, box_width, 100, 3);
-            canvas.fill_rect(box_x, 82, 7, 100, true);
-            canvas.draw_text_prop(box_x + 32, 92, 5, &label);
+            // Label+box block vertically centered in the space below the
+            // header rule instead of floating near the top with a large
+            // empty void underneath; "CHOOSE VALUE" is centered on the
+            // canvas (a caption for the whole screen) rather than pinned
+            // to a hand-tuned x that only lined up by accident, and the
+            // value digits are centered in the box's remaining space
+            // (right of the accent bar) instead of a fixed offset that
+            // only happened to fit one particular digit width.
+            const BOX_TOP: usize = 123;
+            const BOX_H: usize = 120;
+            let caption_width = Canvas::text_prop_width("CHOOSE VALUE", 1);
+            canvas.draw_text_prop(
+                (400usize.saturating_sub(caption_width)) / 2,
+                87,
+                1,
+                "CHOOSE VALUE",
+            );
+            canvas.stroke_rect(box_x, BOX_TOP, box_width, BOX_H, 3);
+            canvas.fill_rect(box_x, BOX_TOP, 7, BOX_H, true);
+            let value_x = box_x + 7 + (box_width - 7 - number_width) / 2;
+            canvas.draw_text_prop(value_x, BOX_TOP + 10, 5, &label);
             footer(canvas, "UP/DOWN CHANGE   ENTER OK   HOLD ENTER BACK");
             if first_draw {
                 let _ = board.display.refresh_full();
@@ -198,9 +228,9 @@ pub fn pick_number(board: &mut Note4Board, title: &str, min: u8, max: u8) -> Opt
             } else {
                 let _ = board.display.refresh_partial(Rect {
                     x: 96,
-                    y: 76,
+                    y: 78,
                     width: 208,
-                    height: 114,
+                    height: 172,
                 });
             }
             needs_redraw = false;

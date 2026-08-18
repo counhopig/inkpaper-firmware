@@ -7,6 +7,7 @@ mod canvas;
 mod control;
 mod display;
 mod font8x16;
+mod icons;
 mod nfc;
 mod power;
 mod rtc;
@@ -182,7 +183,13 @@ fn main() -> Result<()> {
         }
     }
 
-    render_home_now(&mut board, &alarm_store, &todo_store, clock.as_ref());
+    render_home_now(
+        &mut board,
+        &counters,
+        &alarm_store,
+        &todo_store,
+        clock.as_ref(),
+    );
     board.display.refresh_full()?;
     log::info!("Initial display refresh completed");
 
@@ -230,6 +237,7 @@ fn main() -> Result<()> {
                                 clock = Some(dt);
                                 render_home_now(
                                     &mut board,
+                                    &counters,
                                     &alarm_store,
                                     &todo_store,
                                     clock.as_ref(),
@@ -407,7 +415,13 @@ fn main() -> Result<()> {
         }
 
         if !dirty.is_empty() {
-            render_home_now(&mut board, &alarm_store, &todo_store, clock.as_ref());
+            render_home_now(
+                &mut board,
+                &counters,
+                &alarm_store,
+                &todo_store,
+                clock.as_ref(),
+            );
             if dirty
                 .iter()
                 .any(|rect| rect.width == 400 && rect.height == 300)
@@ -432,15 +446,31 @@ fn main() -> Result<()> {
 /// both stores are tiny JSON blobs, cheap next to the EPD refresh itself.
 fn render_home_now(
     board: &mut Note4Board,
+    counters: &PersistedCounters,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
     clock: Option<&DateTime>,
 ) {
     let next_alarm = clock.and_then(|dt| screens::next_alarm_label(alarm_store, dt));
     let todo_pending = screens::pending_todo_count(todo_store);
-    board
-        .display
-        .render_home(clock, next_alarm.as_deref(), todo_pending);
+    let wifi_configured = counters
+        .wifi_creds()
+        .map(|creds| creds.is_some())
+        .unwrap_or(false);
+    let battery_percent = board
+        .battery_millivolts()
+        .ok()
+        .map(board::battery_percent_from_mv);
+    let charging = board.charging_state().0;
+    board.display.render_home(
+        clock,
+        next_alarm.as_ref().map(|label| label.time.as_str()),
+        next_alarm.as_ref().and_then(|label| label.date.as_deref()),
+        todo_pending,
+        wifi_configured,
+        battery_percent,
+        charging,
+    );
 }
 
 /// Periodic auto-sync entry point, called every ~30 s from the main loop.
@@ -495,7 +525,7 @@ fn maybe_auto_sync(
     ) {
         Ok(_) => {
             log::info!("Automatic periodic sync completed");
-            render_home_now(board, alarm_store, todo_store, clock);
+            render_home_now(board, counters, alarm_store, todo_store, clock);
             if let Err(err) = board.display.refresh_partial(FULL_SCREEN_RECT) {
                 log::warn!("Failed to refresh display after auto sync: {err}");
             }
@@ -506,6 +536,9 @@ fn maybe_auto_sync(
 
 fn report_power_state(board: &mut Note4Board) -> Result<()> {
     let (charging, charge_done) = board.charging_state();
+    if let Err(err) = board.update_charging_led() {
+        log::warn!("Charging LED update failed: {err}");
+    }
     match board.battery_millivolts() {
         Ok(vbat_mv) => log::info!(
             "Power state: charging={} charge_done={} vbat_mV={}",
