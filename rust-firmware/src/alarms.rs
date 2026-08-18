@@ -163,7 +163,29 @@ pub fn program_hardware_alarm(
         Some(alarm) => {
             let day = match alarm.repeat {
                 Repeat::Daily => None,
-                Repeat::Once { day, .. } => Some(day),
+                Repeat::Once { year, month, day } => {
+                    // The PCF8563 alarm slot has no month/year register - it
+                    // only compares day-of-month, hour, and minute. Arming
+                    // `day` while `now` is outside the alarm's target month
+                    // would make the chip fire on this month's (or an
+                    // earlier month's) occurrence of that day-of-month,
+                    // ringing the alarm months before the real date. Only
+                    // arm the hardware once we're actually in the target
+                    // month; otherwise leave the slot cleared until a later
+                    // boot/sync/edit re-evaluates (periodic auto-sync calls
+                    // this function on every successful sync, so a
+                    // configured device re-checks at least that often).
+                    if now.year == year && now.month == month {
+                        Some(day)
+                    } else {
+                        log::info!(
+                            "Once alarm id={} scheduled for {:04}-{:02}-{:02} {:02}:{:02} is outside the current month ({:04}-{:02}); deferring hardware arm to avoid an early false ring",
+                            alarm.id, year, month, day, alarm.hour, alarm.minute, now.year, now.month
+                        );
+                        rtc.clear_alarm()?;
+                        return Ok(());
+                    }
+                }
             };
             rtc.set_alarm(&AlarmRegs {
                 minute: alarm.minute,
