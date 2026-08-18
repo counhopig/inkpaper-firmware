@@ -3,7 +3,10 @@ use std::rc::Rc;
 
 use anyhow::{Context, Result};
 use esp_idf_svc::hal::adc::attenuation::DB_12;
-use esp_idf_svc::hal::adc::oneshot::{config::AdcChannelConfig, AdcChannelDriver, AdcDriver};
+use esp_idf_svc::hal::adc::oneshot::{
+    config::{AdcChannelConfig, Calibration},
+    AdcChannelDriver, AdcDriver,
+};
 use esp_idf_svc::hal::gpio::{Input, Output, PinDriver, Pull};
 use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_svc::hal::i2s::{I2sDriver, I2sTx};
@@ -24,10 +27,21 @@ pub type BoardAdc = AdcDriver<'static, esp_idf_svc::hal::adc::ADCU1>;
 /// installed per port).
 pub type SharedI2c = Rc<RefCell<I2cDriver<'static>>>;
 
+/// eFuse curve-fitting calibration (ESP32-S3 three-point fit) instead of
+/// the uncalibrated linear `DirectConverter` fallback: without it the mV
+/// reading carries a systematic offset large enough to skew the battery
+/// percent by several points. Matches the official ZECTRIX demo's
+/// `adc_cali_curve_fitting` setup.
 const BATTERY_ADC_CHANNEL_CONFIG: AdcChannelConfig = AdcChannelConfig {
     attenuation: DB_12,
+    calibration: Calibration::Curve,
     ..AdcChannelConfig::new()
 };
+
+/// Number of ADC samples averaged per `battery_millivolts` call. The
+/// official demo reads 10 times; the averaged value feeds both the percent
+/// curve and the charger state machine, so smoothing matters.
+const BATTERY_ADC_SAMPLES: u32 = 10;
 
 const I2C_FREQUENCY: Hertz = Hertz(400_000);
 
@@ -40,6 +54,8 @@ pub struct Note4Board {
     pub key_down: Button,
     charging: PinDriver<'static, Input>,
     charge_done: PinDriver<'static, Input>,
+    charge_status: ChargeStatus,
+    charge_snapshot: ChargeSnapshot,
     adc: BoardAdc,
     pub display: EpdDisplay,
     pub rtc: Pcf8563,
@@ -48,6 +64,85 @@ pub struct Note4Board {
     pub audio: Option<Es8311>,
     /// `None` when the GT23SC6699 failed to initialize; see `audio` above.
     pub nfc: Option<NfcTag>,
+}
+
+/// Debounced charger status, as a UI/UI-adjacent view of the charge
+/// management IC's two open-drain-ish status lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChargeSnapshot {
+    /// External 5 V supply connected: either status line has been active
+    /// within the hold window. Everything else is gated on this, so the
+    /// battery-only case never reads as "full" from a floating line.
+    pub power_present: bool,
+    /// Battery is actively charging (CHRG_L low, debounced).
+    pub charging: bool,
+    /// Battery is full (STDBY_H high, debounced).
+    pub full: bool,
+}
+
+/// Ported from the official ZECTRIX demo's `ChargeStatus` state machine
+/// (`components/zectrix_board/charge_status.cc`), simplified to the two
+/// status GPIOs plus debounce - the voltage-based precharge/CC/CV stage
+/// split is omitted since the UI only needs charge/full/power-present.
+///
+/// `tick` must be called once per `report_power_state` poll (~1 s); one
+/// tick is the debounce quantum, "stable" means active for ≥ 2 ticks.
+struct ChargeStatus {
+    /// Ticks since either status line was last active; `None` before the
+    /// first activity. `<= 1` means power is present (matches the demo's
+    /// ~1 s `kPowerPresentHoldMs`).
+    power_ticks_since_seen: Option<u32>,
+    charge_ticks: u32,
+    full_ticks: u32,
+    both_ticks: u32,
+    /// Ticks since the last "both lines active" (a charger fault) - the
+    /// demo's `kFaultHoldMs` equivalent.
+    fault_ticks_since_seen: Option<u32>,
+}
+
+impl ChargeStatus {
+    const fn new() -> Self {
+        Self {
+            power_ticks_since_seen: None,
+            charge_ticks: 0,
+            full_ticks: 0,
+            both_ticks: 0,
+            fault_ticks_since_seen: None,
+        }
+    }
+
+    /// One poll tick. `charging` = CHRG_L line low (active), `charge_done`
+    /// = STDBY_H line high (active).
+    fn tick(&mut self, charging: bool, charge_done: bool) -> ChargeSnapshot {
+        self.charge_ticks = if charging { self.charge_ticks + 1 } else { 0 };
+        self.full_ticks = if charge_done { self.full_ticks + 1 } else { 0 };
+        let both_active = charging && charge_done;
+        self.both_ticks = if both_active { self.both_ticks + 1 } else { 0 };
+
+        self.power_ticks_since_seen = if charging || charge_done {
+            Some(0)
+        } else {
+            self.power_ticks_since_seen.map(|t| t + 1)
+        };
+        let power_present = self.power_ticks_since_seen.is_some_and(|t| t <= 1);
+
+        let charge_stable = self.charge_ticks >= 2;
+        let full_stable = self.full_ticks >= 2;
+        let both_stable = self.both_ticks >= 2;
+
+        self.fault_ticks_since_seen = if both_stable {
+            Some(0)
+        } else {
+            self.fault_ticks_since_seen.map(|t| t + 1)
+        };
+        let fault = power_present && self.fault_ticks_since_seen.is_some_and(|t| t <= 1);
+
+        ChargeSnapshot {
+            power_present,
+            charging: power_present && charge_stable && !full_stable && !fault,
+            full: power_present && full_stable && !fault,
+        }
+    }
 }
 
 impl Note4Board {
@@ -145,6 +240,8 @@ impl Note4Board {
             key_down,
             charging,
             charge_done,
+            charge_status: ChargeStatus::new(),
+            charge_snapshot: ChargeSnapshot::default(),
             adc,
             display,
             rtc,
@@ -153,8 +250,26 @@ impl Note4Board {
         })
     }
 
-    pub fn charging_state(&self) -> (bool, bool) {
-        (self.charging.is_low(), self.charge_done.is_high())
+    /// Debounced charger status. Reads both charge-management IC lines and
+    /// advances the `ChargeStatus` state machine; call once per poll cycle
+    /// (~1 s, i.e. from `main.rs`'s `report_power_state`) so the debounce
+    /// tick rate stays constant. Everything else should read
+    /// [`Note4Board::charge_snapshot`].
+    pub fn charging_state(&mut self) -> ChargeSnapshot {
+        let snapshot = self
+            .charge_status
+            .tick(self.charging.is_low(), self.charge_done.is_high());
+        if snapshot.full {
+            log::debug!("charger: full (STDBY_H high, debounced)");
+        }
+        self.charge_snapshot = snapshot;
+        snapshot
+    }
+
+    /// Last tick's charger snapshot, for render paths that must not
+    /// advance the state machine (they run at their own cadence).
+    pub fn charge_snapshot(&self) -> ChargeSnapshot {
+        self.charge_snapshot
     }
 
     /// Drives the status LED (GPIO3) from the charge-management IC's own
@@ -165,9 +280,8 @@ impl Note4Board {
     /// purpose again without adding a timer/blink pattern - a single
     /// `PinDriver::set_high`/`set_low` call per `report_power_state` poll
     /// is enough for a binary "charging or not" signal.
-    pub fn update_charging_led(&mut self) -> Result<()> {
-        let (charging, _charge_done) = self.charging_state();
-        if charging {
+    pub fn update_charging_led(&mut self, charge: ChargeSnapshot) -> Result<()> {
+        if charge.charging {
             self.led.set_high()?;
         } else {
             self.led.set_low()?;
@@ -176,10 +290,11 @@ impl Note4Board {
     }
 
     /// Reads battery voltage via GPIO4 (ADC1 channel 3, on-board 1:2 divider)
-    /// in mV. Returns the ESP-IDF mV reading for the ADC pin doubled, since
-    /// the divider halves VBAT before the pin sees it. The DB_12 attenuation
-    /// tops out around ~3.1 V on ESP32-S3, so the doubled result is clamped
-    /// to `u16::MAX`.
+    /// in mV. Averages `BATTERY_ADC_SAMPLES` raw readings converted with
+    /// eFuse curve-fitting calibration (see `BATTERY_ADC_CHANNEL_CONFIG`),
+    /// then doubles the pin mV since the divider halves VBAT before the
+    /// pin sees it. The DB_12 attenuation tops out around ~3.1 V on
+    /// ESP32-S3, so the doubled result is clamped to `u16::MAX`.
     pub fn battery_millivolts(&mut self) -> Result<u16> {
         let peripherals = unsafe { Peripherals::steal() };
         let mut channel = AdcChannelDriver::new(
@@ -187,26 +302,25 @@ impl Note4Board {
             peripherals.pins.gpio4,
             &BATTERY_ADC_CHANNEL_CONFIG,
         )?;
-        let adc_mv = self.adc.read(&mut channel)?;
-        let vbat_mv = (adc_mv as u32) * 2;
+        let mut sum: u32 = 0;
+        for _ in 0..BATTERY_ADC_SAMPLES {
+            sum += self.adc.read(&mut channel)? as u32;
+        }
+        let avg_mv = (sum / BATTERY_ADC_SAMPLES) as u16;
+        let vbat_mv = (avg_mv as u32) * 2;
         Ok(vbat_mv.min(u16::MAX as u32) as u16)
     }
 }
 
-/// Rough single-cell LiPo state-of-charge estimate from voltage, linear
-/// between the common 3300mV "empty" cutoff and 4200mV "full charge". Real
-/// LiPo discharge curves aren't linear, but there's no fuel-gauge IC on
-/// this board - this is a coarse glance indicator for the Home screen, not
-/// a precise one.
+/// Battery percent from the official ZECTRIX demo's quadratic fit of the
+/// single-cell LiPo discharge curve (`zectrix_board.cc::ReadBattery`):
+/// `(-mv^2 + 9016*mv - 19189000) / 10000`, clamped to 0..100. 0% sits at
+/// ~3444 mV and 100% at ~4200 mV; the curve is steeper in the upper band
+/// than the old linear 3300-4200 mapping, which over-reported percent
+/// around the 4.0 V plateau where a discharging cell spends most of its
+/// life.
 pub fn battery_percent_from_mv(mv: u16) -> u8 {
-    const EMPTY_MV: u32 = 3300;
-    const FULL_MV: u32 = 4200;
-    let mv = mv as u32;
-    if mv <= EMPTY_MV {
-        0
-    } else if mv >= FULL_MV {
-        100
-    } else {
-        (((mv - EMPTY_MV) * 100) / (FULL_MV - EMPTY_MV)) as u8
-    }
+    let mv = mv as i32;
+    let calculated = (-mv * mv + 9016 * mv - 19189000) / 10000;
+    calculated.clamp(0, 100) as u8
 }

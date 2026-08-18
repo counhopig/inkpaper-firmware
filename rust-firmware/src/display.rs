@@ -5,6 +5,7 @@ use esp_idf_svc::sys::zectrix_epd::{
     zectrix_epd_refresh_full_1bpp, zectrix_epd_refresh_partial_1bpp,
 };
 
+use crate::board::ChargeSnapshot;
 use crate::canvas::Canvas;
 use crate::canvas::WIDTH;
 use crate::icons::{self, Icon};
@@ -65,7 +66,7 @@ impl EpdDisplay {
         todo_pending: usize,
         wifi_configured: bool,
         battery_percent: Option<u8>,
-        charging: bool,
+        charge: ChargeSnapshot,
     ) {
         self.canvas.clear();
         self.canvas.draw_text_prop(16, 8, 1, "INKPAPER");
@@ -78,7 +79,7 @@ impl EpdDisplay {
         // visually indistinguishable from the filled one once actually
         // rendered.
         let percent = battery_percent.unwrap_or(0);
-        let battery_icon: &Icon = if charging {
+        let battery_icon: &Icon = if charge.charging {
             if percent < 34 {
                 &icons::CHARGING_LOW
             } else if percent < 67 {
@@ -86,6 +87,11 @@ impl EpdDisplay {
             } else {
                 &icons::CHARGING_HIGH
             }
+        } else if charge.full {
+            // Full on the charger's own (debounced) signal is more
+            // trustworthy than a voltage-derived percent, so show the
+            // filled cell regardless of where the percent curve sits.
+            &icons::BATTERY_FULL
         } else if percent < 10 {
             &icons::BATTERY_OUTLINE
         } else if percent < 40 {

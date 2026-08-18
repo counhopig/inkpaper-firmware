@@ -258,7 +258,7 @@ fn browse_page(
                         .battery_millivolts()
                         .ok()
                         .map(crate::board::battery_percent_from_mv);
-                    let charging = board.charging_state().0;
+                    let charge = board.charge_snapshot();
                     board.display.render_home(
                         now,
                         next_alarm.as_ref().map(|label| label.time.as_str()),
@@ -266,7 +266,7 @@ fn browse_page(
                         pending_todo_count(todo_store),
                         wifi_configured,
                         battery_percent,
-                        charging,
+                        charge,
                     );
                 }
                 Page::Calendar => {

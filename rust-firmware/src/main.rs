@@ -460,7 +460,7 @@ fn render_home_now(
         .battery_millivolts()
         .ok()
         .map(board::battery_percent_from_mv);
-    let charging = board.charging_state().0;
+    let charge = board.charge_snapshot();
     board.display.render_home(
         clock,
         next_alarm.as_ref().map(|label| label.time.as_str()),
@@ -468,7 +468,7 @@ fn render_home_now(
         todo_pending,
         wifi_configured,
         battery_percent,
-        charging,
+        charge,
     );
 }
 
@@ -534,23 +534,26 @@ fn maybe_auto_sync(
 }
 
 fn report_power_state(board: &mut Note4Board) -> Result<()> {
-    let (charging, charge_done) = board.charging_state();
-    if let Err(err) = board.update_charging_led() {
+    let charge = board.charging_state();
+    if let Err(err) = board.update_charging_led(charge) {
         log::warn!("Charging LED update failed: {err}");
     }
     match board.battery_millivolts() {
         Ok(vbat_mv) => log::info!(
-            "Power state: charging={} charge_done={} vbat_mV={}",
-            charging,
-            charge_done,
-            vbat_mv
+            "Power state: power_present={} charging={} full={} vbat_mV={} ({}%)",
+            charge.power_present,
+            charge.charging,
+            charge.full,
+            vbat_mv,
+            board::battery_percent_from_mv(vbat_mv)
         ),
         Err(err) => {
             log::warn!("Battery ADC read failed: {err}");
             log::info!(
-                "Power state: charging={} charge_done={} vbat_mV=<n/a>",
-                charging,
-                charge_done
+                "Power state: power_present={} charging={} full={} vbat_mV=<n/a>",
+                charge.power_present,
+                charge.charging,
+                charge.full
             );
         }
     }
