@@ -28,7 +28,7 @@ inkpaper/
 | 实机验证状态/跨仓库进度 | `docs/project-status.md` | 含"尚未实机验证"清单 |
 
 ## CODE MAP
-无 codegraph 工具；rust-analyzer 对 Xtensa target 无响应（3 次超时）——以下为静态分析，引用中心性未测量。
+无 codegraph 工具；rust-analyzer 自 2026-08-18 起可用（`esp-ra` 工具链 + IDF env 注入，见 NOTES）——以下为静态分析，引用中心性未测量。
 
 | Symbol | Type | Location | Role |
 |--------|------|----------|------|
@@ -41,8 +41,8 @@ inkpaper/
 | 两个共享单例 | — | `main.rs:97-105, 214` | 一个 NVS partition handle + 一个 WifiManager，每进程各建一次 |
 
 ## CONVENTIONS
-- 文档与 commit 描述用中文；commit 为 conventional 格式（`feat:`/`fix:`/`docs:` 等，小写开头）。
-- **无测试、无 CI、无 clippy**：`harness = false`，提交前检查 = fmt + release 构建 + 实机人工验证（development-guide §13）。
+- 文档用中文；commit 为 conventional 格式且用英文描述（`feat:`/`fix:`/`docs:` 等，小写开头）。
+- **无测试、无 CI**：`harness = false`，提交前检查 = fmt + clippy 零警告 + release 构建 + 实机人工验证（development-guide §13）。
 - 工具链固定 `esp` 频道（`rust-toolchain.toml`）；格式化必须 `cargo +esp fmt`，禁用 stable/nightly。
 - 体积优先：release `opt-level="s"`、dev `"z"`；`build-std=["std","panic_abort"]`。
 - `cargo run` = 烧录+监视（runner=espflash）；裸 `cargo build` 在未 source ESP-IDF 环境的 shell 里必失败——一律走 `scripts/build-rust.sh`。
@@ -66,13 +66,15 @@ inkpaper/
 ```bash
 ./scripts/build-rust.sh --release        # 构建（脚本自 source ESP-IDF 环境；不加参数=debug）
 cargo +esp fmt --manifest-path rust-firmware/Cargo.toml -- --check   # 提交前检查
-espflash flash --port /dev/ttyACM0 --chip esp32s3 --flash-size 16mb \
+./scripts/build-rust.sh && cd rust-firmware && cargo clippy   # clippy 零警告（需 IDF env，可借 build-rust.sh 的 export）
+espflash flash --port /dev/tty.usbmodem1101 --chip esp32s3 --flash-size 16mb \
   --flash-mode dio --flash-freq 80mhz --partition-table rust-firmware/partitions.csv \
-  rust-firmware/target/xtensa-esp32s3-espidf/release/inkpaper-note4  # 烧录
-espflash monitor --port /dev/ttyACM0     # 串口日志（唯一的"测试"手段）
+  rust-firmware/target/xtensa-esp32s3-espidf/release/inkpaper-note4  # 烧录（macOS 端口名；Linux 为 /dev/ttyACM0）
+espflash monitor --port /dev/tty.usbmodem1101     # 串口日志（唯一的"测试"手段）
 ```
 
 ## NOTES
 - `rust-firmware/.cargo/config.toml` 含机器相关路径（`IDF_PATH=~/esp/esp-idf`、`LIBCLANG_PATH` 指向本机 espup esp-clang）——换机或换工具链版本需手改。
+- **rust-analyzer 可用性依赖两个机器相关件**（均随本仓库根 `.vscode/settings.json` 生效）：① `esp-ra` 工具链（`rustup toolchain link esp-ra ~/esp/esp-ra`）：`bin/cargo` 是 wrapper（`--version` 报 1.96.0，其余转发 esp cargo），`rustc`/`rustdoc` 为指向 esp 工具链的符号链接——espup 重装后需重建；② `.vscode/settings.json` 注入 `RUSTUP_TOOLCHAIN=esp-ra` + IDF env（IDF_PATH、tools、venv python，路径为 `~/esp/esp-idf` 与 `~/.espressif/python_env/idf5.5_py3.9_env/bin`）。根因：rust-analyzer 0.3.3016 将 esp cargo 的 `1.95.0-nightly` 判为 <1.95.0，走已移除的 `--lockfile-path` 参数导致 `cargo metadata` 降级 `--no-deps`（编辑器假 unresolved import）；wrapper 引导其走 `-Zlockfile-path` 分支（esp cargo 支持）。rustup 上游升级到 rustc ≥1.96.0-nightly 后可移除整个 hack。
 - 设备支持自动周期 sync（默认 60 分钟，设置菜单可改 1/5/10/30/60），失败会在下个周期重试；`esp_wifi_stop()` 与 `esp_restart()` 仍属红线，见红线 #3。
 - 尚未实机验证：闹钟响铃全流程、BLE 端到端配对——改相关代码后无法靠"编译通过"背书。

@@ -40,9 +40,11 @@
 ```bash
 ./scripts/build-rust.sh --release   # 从仓库根跑；crate 内裸 cargo build 需已 source ESP-IDF 环境
 cargo +esp fmt -- --check           # crate 目录内
+cargo clippy                        # 需先 source ESP-IDF 环境；当前零警告（browse_page 有 #[allow(clippy::too_many_arguments)]）
 ```
 
 ## NOTES
 - `.cargo/config.toml` 的 `IDF_PATH`/`LIBCLANG_PATH` 是机器相关的，见根 AGENTS.md NOTES。
+- rust-analyzer 的可用性依赖根仓库 `.vscode/settings.json` + `esp-ra` 工具链（根因与重建方法见根 AGENTS.md NOTES）；改代码后可在编辑器内直接看诊断。
 - 改 `sdkconfig.defaults` 时对照根红线 #2（DIO）与 partitions.csv 6 层相对路径约定。
 - 无测试可跑；验证 = 烧录 + monitor（根 AGENTS.md COMMANDS）。
