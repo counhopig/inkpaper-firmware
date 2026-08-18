@@ -230,6 +230,7 @@ pub fn open_navigation(
 
 /// Runs one peer content page. Long UP/DOWN opens the navigation overlay;
 /// cancelling that overlay restores this page.
+#[allow(clippy::too_many_arguments)]
 fn browse_page(
     board: &mut Note4Board,
     mut page: Page,

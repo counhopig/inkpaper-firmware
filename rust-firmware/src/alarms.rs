@@ -137,8 +137,8 @@ pub fn next_id(alarms: &[StoredAlarm]) -> u8 {
 
 /// True for a `Once` alarm whose date has already passed relative to `now`
 /// - i.e. it fired (or was skipped over) and should be dropped from the
-/// store so it doesn't linger and confuse `next_due` forever. Daily alarms
-/// recur on their own and are never "expired".
+///   store so it doesn't linger and confuse `next_due` forever. Daily alarms
+///   recur on their own and are never "expired".
 pub fn is_expired_once(alarm: &StoredAlarm, now: &DateTime) -> bool {
     matches!(alarm.repeat, Repeat::Once { .. }) && minutes_until(alarm, now) == i64::MAX
 }

@@ -171,35 +171,10 @@ impl Es8311 {
         self.write_reg(reg::DAC_31, reg31)
     }
 
-    /// Enables the speaker PA and writes interleaved 16-bit stereo PCM
-    /// samples to the I2S TX channel, blocking until the whole buffer is
-    /// queued. Keep `samples` small (a few KB): PSRAM on this board is only
-    /// reachable via explicit `heap_caps` allocation
-    /// (`CONFIG_SPIRAM_USE_CAPS_ALLOC`, not `_USE_MALLOC`), so a `Vec` this
-    /// size has to fit in internal SRAM alongside everything else. For
-    /// longer clips, write in chunks instead - see [`Es8311::play_sine_stereo`]
-    /// for the pattern.
-    #[allow(dead_code)]
-    pub fn play_pcm_stereo(&mut self, samples: &[i16]) -> Result<()> {
-        self.pa_enable.set_high()?;
-        // Let the PA rail settle before driving it with audio.
-        thread::sleep(Duration::from_millis(10));
-
-        let mut bytes = Vec::with_capacity(samples.len() * 2);
-        for sample in samples {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-
-        self.i2s.tx_enable()?;
-        let result = self.i2s.write_all(&bytes, I2S_WRITE_TIMEOUT_TICKS);
-        self.drain_and_disable();
-        result.map_err(|e| anyhow!("I2S write failed: {e}"))
-    }
-
     /// Streams a sine tone straight to the I2S TX channel in small
     /// stack-buffered chunks, so a multi-second tone never needs a single
-    /// large heap allocation (see the note on [`Es8311::play_pcm_stereo`]).
-    /// Used as the alarm-ring tone (see `main.rs::ring_alarm_until_dismissed`).
+    /// large heap allocation. Used as the alarm-ring tone (see
+    /// `main.rs::ring_alarm_until_dismissed`).
     pub fn play_sine_stereo(
         &mut self,
         freq_hz: f32,

@@ -165,12 +165,6 @@ impl EpdDisplay {
         );
     }
 
-    #[allow(dead_code)]
-    pub fn render_clock(&mut self, clock: &DateTime) {
-        self.canvas.clear();
-        self.draw_clock(clock);
-    }
-
     fn draw_clock(&mut self, dt: &DateTime) {
         let time = format!("{:02}:{:02}", dt.hour, dt.minute);
         self.canvas.draw_text_prop(24, 44, 4, &time);

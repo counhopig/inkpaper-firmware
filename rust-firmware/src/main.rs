@@ -63,7 +63,6 @@ const FULL_SCREEN_RECT: Rect = Rect {
 /// once the RTC keeps time on its coin cell we stop consulting this.
 const BUILD_EPOCH_SECS: u64 = build_epoch_secs();
 
-#[allow(dead_code)]
 const fn build_epoch_secs() -> u64 {
     let bytes: &[u8] = env!("BUILD_EPOCH_SECS").as_bytes();
     let mut i = 0;

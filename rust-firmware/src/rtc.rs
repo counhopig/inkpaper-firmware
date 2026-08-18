@@ -19,7 +19,6 @@ pub struct DateTime {
 }
 
 impl DateTime {
-    #[allow(dead_code)]
     pub fn from_unix(epoch: u64) -> Self {
         let secs = (epoch % 86400) as u32;
         let mut days = (epoch / 86400) as i64;
@@ -97,7 +96,6 @@ fn bcd_to_bin(b: u8) -> u8 {
     ((b >> 4) & 0x0F) * 10 + (b & 0x0F)
 }
 
-#[allow(dead_code)]
 fn bin_to_bcd(b: u8) -> u8 {
     ((b / 10) << 4) | (b % 10)
 }
@@ -158,7 +156,6 @@ impl Pcf8563 {
         })
     }
 
-    #[allow(dead_code)]
     pub fn write_time(&mut self, dt: &DateTime) -> Result<()> {
         let year_offset = (dt.year % 100) as u8;
         let payload = [
