@@ -60,6 +60,18 @@ Returned when the server has new or updated content. Body is JSON shaped as:
       },
       "enabled": true,
       "label": "Christmas alarm"
+    },
+    {
+      "id": 2,
+      "hour": 9,
+      "minute": 0,
+      "repeat": {
+        "Weekly": {
+          "days": [0, 2, 4]
+        }
+      },
+      "enabled": true,
+      "label": "Gym"
     }
   ],
   "todos": [
@@ -68,7 +80,8 @@ Returned when the server has new or updated content. Body is JSON shaped as:
       "text": "Buy groceries",
       "done": false,
       "importance": "medium",
-      "due_date": null
+      "due_date": null,
+      "repeat": null
     },
     {
       "id": 1,
@@ -76,8 +89,14 @@ Returned when the server has new or updated content. Body is JSON shaped as:
       "done": true,
       "importance": "high",
       "due_date": {
+        "year": 2026,
         "month": 8,
         "day": 19
+      },
+      "repeat": {
+        "Monthly": {
+          "days": [1, 15]
+        }
       }
     }
   ]
@@ -93,11 +112,16 @@ Each alarm object:
   list. Used for deduplication and tracking edits across syncs.
 - **`hour`** (u8): Hour component of the alarm time (0–23, 24-hour format).
 - **`minute`** (u8): Minute component of the alarm time (0–59).
-- **`repeat`** (enum): Recurrence pattern. Either:
+- **`repeat`** (enum): Recurrence pattern. Weekdays are 0=Sunday ..
+  6=Saturday (matching the RTC and JS `Date.getDay()`); month days are
+  1..=31. One of:
   - `"Daily"` (string) — fires every day at this time.
-  - An object `{ "Once": { "year": u16, "month": u8, "day": u8 } }` — fires
-    once on the specified calendar date (after which the firmware may discard
-    it).
+  - `{ "Weekly": { "days": [u8] } }` — fires at this time on each listed
+    weekday.
+  - `{ "Monthly": { "days": [u8] } }` — fires at this time on each listed
+    day of the month.
+  - `{ "Once": { "year": u16, "month": u8, "day": u8 } }` — fires once on
+    the specified calendar date (after which the firmware may discard it).
 - **`enabled`** (bool): Whether this alarm is currently active.
 - **`label`** (string): Human-readable name or description (may be empty).
 
@@ -113,10 +137,18 @@ Each todo object:
   `"medium"`, or `"high"`. The device cycles it via long-ENTER on the Todos
   page and uploads it back; the calendar page sizes the due marker by it, and
   a `high` todo due today triggers a once-per-day on-device reminder.
-- **`due_date`** (object or null, optional, default `null`): `{ "month": u8,
-  "day": u8 }` — a month/day the todo is due. The device calendar draws a
-  marker on that day of the month; `high`-importance todos due today trigger
-  the reminder screen described above.
+- **`due_date`** (object or null, optional, default `null`): `{ "year": u16,
+  "month": u8, "day": u8 }` — the concrete date the todo is due (used when
+  `repeat` is `null`). The device calendar draws a marker on that date;
+  `high`-importance todos due today trigger the reminder screen described
+  above. (The `year` field is optional on read for backward compatibility;
+  a missing year never matches a real date, so such todos simply don't
+  mark the calendar or remind until re-edited.)
+- **`repeat`** (enum or null, optional, default `null`): Same shape as an
+  alarm's `repeat` (`"Daily"`, `{"Weekly": ...}`, `{"Monthly": ...}`), but
+  `Once` is not meaningful for a todo - use `due_date` for one-off due
+  dates. When set, the todo is due on every date the schedule covers, and
+  the calendar/reminder logic uses the schedule instead of `due_date`.
 
 #### ETag Header (optional)
 

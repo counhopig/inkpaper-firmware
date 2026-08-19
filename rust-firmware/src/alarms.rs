@@ -15,16 +15,40 @@ const KEY_ALARMS: &str = "alarms";
 /// NVS blob entries top out around ~4000 bytes on this partition anyway.
 const BLOB_BUF_LEN: usize = 1024;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Recurrence schedule, wire-compatible with the server's
+/// `models::Repeat`. Externally tagged by serde: `"Daily"`, `{"Weekly":
+/// {"days": [0, 2, 4]}}`, `{"Monthly": {"days": [1, 15]}}`, or `{"Once":
+/// {"year": 2026, "month": 8, "day": 19}}`. Weekdays are 0=Sunday ..
+/// 6=Saturday (matching the RTC's `DateTime.weekday` and JS
+/// `Date.getDay()`); month days are 1..=31.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Repeat {
+    /// Every day at the alarm's time.
     Daily,
+    /// Days of the week at the alarm's time. Never empty once created.
+    Weekly { days: Vec<u8> },
+    /// Days of the month at the alarm's time. Never empty once created.
+    Monthly { days: Vec<u8> },
     /// Fires once on this calendar date, then the caller is expected to
     /// drop it from the store (see `main.rs`'s ack-and-rearm flow).
-    Once {
-        year: u16,
-        month: u8,
-        day: u8,
-    },
+    Once { year: u16, month: u8, day: u8 },
+}
+
+impl Repeat {
+    /// Whether this schedule covers the given calendar date. `weekday`
+    /// is 0=Sunday..6=Saturday.
+    pub fn fires_on(&self, year: u16, month: u8, day: u8, weekday: u8) -> bool {
+        match self {
+            Repeat::Daily => true,
+            Repeat::Weekly { days } => days.contains(&weekday),
+            Repeat::Monthly { days } => days.contains(&day),
+            Repeat::Once {
+                year: y,
+                month: m,
+                day: d,
+            } => *y == year && *m == month && *d == day,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,6 +125,58 @@ fn days_since_epoch(year: u16, month: u8, day: u8) -> i64 {
     days + day as i64 - 1
 }
 
+/// Days per month for a given year (leap-aware).
+fn month_lengths(year: i64) -> [i64; 12] {
+    if is_leap(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    }
+}
+
+/// Calendar date (year, month, day) for an absolute day number relative to
+/// 1970-01-01. Inverse of `days_since_epoch`.
+fn date_from_days(mut days: i64) -> (u16, u8, u8) {
+    let mut year = 1970i64;
+    loop {
+        let dim = if is_leap(year) { 366 } else { 365 };
+        if days < dim {
+            break;
+        }
+        days -= dim;
+        year += 1;
+    }
+    for (idx, dim) in month_lengths(year).iter().enumerate() {
+        if days < *dim {
+            return (year as u16, (idx + 1) as u8, (days + 1) as u8);
+        }
+        days -= *dim;
+    }
+    unreachable!("date_from_days ran past a year's day count")
+}
+
+/// Weekday (0=Sunday..6=Saturday) for an absolute day number. 1970-01-01
+/// was a Thursday (3).
+fn weekday_from_days(days: i64) -> u8 {
+    ((days + 3).rem_euclid(7)) as u8
+}
+
+/// The next calendar date (year, month, day, weekday) that `repeat` covers,
+/// at or after `now`'s date. Non-empty schedules always match within ~62
+/// days, so the scan is bounded and the fallback is unreachable in practice.
+pub(crate) fn next_occurrence_date(repeat: &Repeat, now: &DateTime) -> (u16, u8, u8, u8) {
+    let now_days = days_since_epoch(now.year, now.month, now.day);
+    for offset in 0..370 {
+        let days = now_days + offset;
+        let (year, month, day) = date_from_days(days);
+        let weekday = weekday_from_days(days);
+        if repeat.fires_on(year, month, day, weekday) {
+            return (year, month, day, weekday);
+        }
+    }
+    (now.year, now.month, now.day, now.weekday)
+}
+
 /// Minutes from `now` until `alarm` next fires, or `i64::MAX` if it's a
 /// `Once` alarm whose date has already passed (a live store shouldn't have
 /// these - `main.rs` drops fired one-shots - but `next_due` stays correct
@@ -108,7 +184,7 @@ fn days_since_epoch(year: u16, month: u8, day: u8) -> i64 {
 fn minutes_until(alarm: &StoredAlarm, now: &DateTime) -> i64 {
     let now_minutes = now.hour as i64 * 60 + now.minute as i64;
     let alarm_minutes = alarm.hour as i64 * 60 + alarm.minute as i64;
-    match alarm.repeat {
+    match &alarm.repeat {
         Repeat::Daily => {
             let mut delta = alarm_minutes - now_minutes;
             if delta < 0 {
@@ -116,9 +192,27 @@ fn minutes_until(alarm: &StoredAlarm, now: &DateTime) -> i64 {
             }
             delta
         }
+        Repeat::Weekly { .. } | Repeat::Monthly { .. } => {
+            let now_days = days_since_epoch(now.year, now.month, now.day);
+            for offset in 0..370 {
+                let days = now_days + offset;
+                let (year, month, day) = date_from_days(days);
+                let weekday = weekday_from_days(days);
+                if !alarm.repeat.fires_on(year, month, day, weekday) {
+                    continue;
+                }
+                if offset == 0 && alarm_minutes <= now_minutes {
+                    // Today's occurrence already passed; keep scanning for
+                    // the next matching date.
+                    continue;
+                }
+                return offset * 24 * 60 + (alarm_minutes - now_minutes);
+            }
+            i64::MAX
+        }
         Repeat::Once { year, month, day } => {
             let now_days = days_since_epoch(now.year, now.month, now.day);
-            let alarm_days = days_since_epoch(year, month, day);
+            let alarm_days = days_since_epoch(*year, *month, *day);
             let delta = (alarm_days - now_days) * 24 * 60 + (alarm_minutes - now_minutes);
             if delta < 0 {
                 i64::MAX
@@ -161,9 +255,32 @@ pub fn program_hardware_alarm(
 ) -> Result<()> {
     match next_due(alarms, now) {
         Some(alarm) => {
-            let day = match alarm.repeat {
-                Repeat::Daily => None,
-                Repeat::Once { year, month, day } => {
+            let day: Option<u8>;
+            let weekday: Option<u8>;
+            match &alarm.repeat {
+                Repeat::Daily => {
+                    day = None;
+                    weekday = None;
+                }
+                Repeat::Weekly { .. } => {
+                    // The PCF8563 supports weekday matching, so arm the
+                    // next covered weekday; every ring is re-programmed by
+                    // the ack-and-rearm flow, so it can't keep firing on
+                    // later weeks that don't contain a nearer alarm.
+                    let (_, _, _, dow) = next_occurrence_date(&alarm.repeat, now);
+                    day = None;
+                    weekday = Some(dow);
+                }
+                Repeat::Monthly { .. } => {
+                    let (_, _, day_of_month, _) = next_occurrence_date(&alarm.repeat, now);
+                    day = Some(day_of_month);
+                    weekday = None;
+                }
+                Repeat::Once {
+                    year,
+                    month,
+                    day: d,
+                } => {
                     // The PCF8563 alarm slot has no month/year register - it
                     // only compares day-of-month, hour, and minute. Arming
                     // `day` while `now` is outside the alarm's target month
@@ -175,12 +292,13 @@ pub fn program_hardware_alarm(
                     // boot/sync/edit re-evaluates (periodic auto-sync calls
                     // this function on every successful sync, so a
                     // configured device re-checks at least that often).
-                    if now.year == year && now.month == month {
-                        Some(day)
+                    if now.year == *year && now.month == *month {
+                        day = Some(*d);
+                        weekday = None;
                     } else {
                         log::info!(
                             "Once alarm id={} scheduled for {:04}-{:02}-{:02} {:02}:{:02} is outside the current month ({:04}-{:02}); deferring hardware arm to avoid an early false ring",
-                            alarm.id, year, month, day, alarm.hour, alarm.minute, now.year, now.month
+                            alarm.id, year, month, d, alarm.hour, alarm.minute, now.year, now.month
                         );
                         rtc.clear_alarm()?;
                         return Ok(());
@@ -191,7 +309,7 @@ pub fn program_hardware_alarm(
                 minute: alarm.minute,
                 hour: alarm.hour,
                 day,
-                weekday: None,
+                weekday,
             })?;
             log::info!(
                 "Hardware alarm armed: id={} {:02}:{:02} ({:?})",

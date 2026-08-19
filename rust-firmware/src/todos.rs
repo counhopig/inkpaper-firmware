@@ -5,6 +5,8 @@ use anyhow::{anyhow, Result};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use serde::{Deserialize, Serialize};
 
+use crate::alarms::Repeat;
+
 const NAMESPACE: &str = "inkpaper_todo";
 const KEY_TODOS: &str = "todos";
 const BLOB_BUF_LEN: usize = 2048;
@@ -21,11 +23,15 @@ pub enum Importance {
     High,
 }
 
-/// Optional due date - month/day without a year. The calendar page draws a
-/// marker on that day of the month, and a `High` todo due today triggers a
-/// one-shot reminder in `main.rs`.
+/// Full due date (year/month/day). The calendar page draws a marker on that
+/// date, and a `High` todo due today triggers a one-shot reminder in
+/// `main.rs`. The `year` field defaults to 0 so records synced before it
+/// existed deserialize safely (year 0 never matches a real date, so such
+/// todos simply don't mark the calendar or remind).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoDue {
+    #[serde(default)]
+    pub year: u16,
     pub month: u8,
     pub day: u8,
 }
@@ -37,8 +43,13 @@ pub struct Todo {
     pub done: bool,
     #[serde(default)]
     pub importance: Importance,
+    /// Single due date (used when `repeat` is `None`).
     #[serde(default)]
     pub due_date: Option<TodoDue>,
+    /// Recurrence schedule; when set, the todo is due on every date the
+    /// schedule covers instead of just `due_date`.
+    #[serde(default)]
+    pub repeat: Option<Repeat>,
 }
 
 pub struct TodoStore {

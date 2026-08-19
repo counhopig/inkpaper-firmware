@@ -276,25 +276,44 @@ fn browse_page(
                     if let Some(dt) = now {
                         let alarms = alarm_store.load().unwrap_or_default();
                         let todos = todo_store.load().unwrap_or_default();
-                        // Day markers for the visible month: once-shot
-                        // alarms, and todos due that day (importance is
-                        // carried so the marker can be sized by it).
-                        let once_days: Vec<u8> = alarms
-                            .iter()
-                            .filter_map(|a| match a.repeat {
-                                Repeat::Once { month: m, day, .. } if m == dt.month => Some(day),
-                                _ => None,
-                            })
-                            .collect();
-                        let todo_due: Vec<(u8, Importance)> = todos
-                            .iter()
-                            .filter_map(|t| {
-                                t.due_date.and_then(|d| {
-                                    (d.month == dt.month).then_some((d.day, t.importance))
-                                })
-                            })
-                            .collect();
-                        draw_month_grid(canvas, dt.year, dt.month, now, &once_days, &todo_due);
+                        // Day markers for the visible month. Alarms mark
+                        // every day their schedule covers; todos mark every
+                        // day they are due (repeat schedule, or their single
+                        // due date). Importance is carried so the marker can
+                        // be sized by it.
+                        let mut marks = [DayMark::default(); 32];
+                        let days_in_month = days_in_month(dt.year, dt.month);
+                        for alarm in alarms.iter().filter(|a| a.enabled) {
+                            for day in 1..=days_in_month {
+                                if alarm.repeat.fires_on(
+                                    dt.year,
+                                    dt.month,
+                                    day,
+                                    weekday_of(dt.year, dt.month, day),
+                                ) {
+                                    marks[day as usize].alarm = true;
+                                }
+                            }
+                        }
+                        for todo in todos.iter() {
+                            for day in 1..=days_in_month {
+                                let fires = match &todo.repeat {
+                                    Some(r) => r.fires_on(
+                                        dt.year,
+                                        dt.month,
+                                        day,
+                                        weekday_of(dt.year, dt.month, day),
+                                    ),
+                                    None => todo.due_date.is_some_and(|d| {
+                                        d.year == dt.year && d.month == dt.month && d.day == day
+                                    }),
+                                };
+                                if fires {
+                                    marks[day as usize].todo = Some(todo.importance);
+                                }
+                            }
+                        }
+                        draw_month_grid(canvas, dt.year, dt.month, now, &marks);
                     }
                     footer(canvas, "HOLD UP/DOWN SWITCH PAGE");
                 }
@@ -390,18 +409,26 @@ fn browse_page(
     }
 }
 
+/// Per-day cell marker for the month grid: whether an enabled alarm's
+/// schedule covers that day, and (optionally) the importance of a todo due
+/// that day.
+#[derive(Clone, Copy, Default)]
+struct DayMark {
+    alarm: bool,
+    todo: Option<Importance>,
+}
+
 /// Read-only current-month grid, today highlighted. No month navigation in
 /// v1 - the device always shows "now". Day cells carry small markers under
-/// the date number: a solid block left of center for a once-shot alarm,
-/// another (larger for High importance) for a todo due that day - the
-/// calendar is where alarms and todos meet.
+/// the date number: a solid block left of center when an enabled alarm's
+/// schedule covers that day, another (larger for High importance) for a
+/// todo due that day - the calendar is where alarms and todos meet.
 fn draw_month_grid(
     canvas: &mut crate::canvas::Canvas,
     year: u16,
     month: u8,
     today: Option<&DateTime>,
-    once_alarm_days: &[u8],
-    todo_due: &[(u8, Importance)],
+    marks: &[DayMark; 32],
 ) {
     let title = format!("{:04} / {:02}", year, month);
     canvas.draw_text_prop(16, 38, 2, &title);
@@ -441,15 +468,12 @@ fn draw_month_grid(
             canvas.fill_rect(x.saturating_sub(6), y.saturating_sub(6), 4, 26, true);
         }
         canvas.draw_text_prop(x, y, 1, &text);
-        if once_alarm_days.contains(&day) {
+        let mark = marks[day as usize];
+        if mark.alarm {
             canvas.fill_rect(x, y + 13, 4, 4, true);
         }
-        if let Some((_, importance)) = todo_due.iter().find(|(d, _)| *d == day) {
-            let size = if *importance == Importance::High {
-                6
-            } else {
-                4
-            };
+        if let Some(importance) = mark.todo {
+            let size = if importance == Importance::High { 6 } else { 4 };
             canvas.fill_rect(x + 9, y + 13, size, size, true);
         }
         col += 1;
@@ -483,8 +507,26 @@ fn weekday_of(year: u16, month: u8, day: u8) -> u8 {
 
 fn format_alarm_row(alarm: &StoredAlarm) -> String {
     let mark = if alarm.enabled { "[X]" } else { "[ ]" };
-    let when = match alarm.repeat {
+    let when = match &alarm.repeat {
         Repeat::Daily => format!("{:02}:{:02} DAILY", alarm.hour, alarm.minute),
+        Repeat::Weekly { days } => {
+            let weekdays: Vec<&str> = days.iter().map(|d| WEEKDAY_SHORT[*d as usize]).collect();
+            format!(
+                "{:02}:{:02} {}",
+                alarm.hour,
+                alarm.minute,
+                weekdays.join(" ")
+            )
+        }
+        Repeat::Monthly { days } => {
+            let list: Vec<String> = days.iter().map(|d| d.to_string()).collect();
+            format!(
+                "{:02}:{:02} DAY {}",
+                alarm.hour,
+                alarm.minute,
+                list.join(",")
+            )
+        }
         Repeat::Once { month, day, .. } => {
             format!(
                 "{:02}:{:02} {:02}/{:02}",
@@ -494,6 +536,8 @@ fn format_alarm_row(alarm: &StoredAlarm) -> String {
     };
     format!("{mark} {when}")
 }
+
+const WEEKDAY_SHORT: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
 
 fn render_alarm_page(board: &mut Note4Board, store: &AlarmStore, selected: usize) {
     let mut items: Vec<String> = store
@@ -771,8 +815,12 @@ pub fn next_alarm_label(store: &AlarmStore, now: &DateTime) -> Option<NextAlarmL
     };
     alarms::next_due(&list, now).map(|alarm| {
         let time = format!("{:02}:{:02}", alarm.hour, alarm.minute);
-        let date = match alarm.repeat {
+        let date = match &alarm.repeat {
             Repeat::Daily => None,
+            Repeat::Weekly { .. } | Repeat::Monthly { .. } => {
+                let (_, month, day, _) = alarms::next_occurrence_date(&alarm.repeat, now);
+                Some(format!("{:02}/{:02}", month, day))
+            }
             Repeat::Once { month, day, .. } => Some(format!("{:02}/{:02}", month, day)),
         };
         NextAlarmLabel { time, date }

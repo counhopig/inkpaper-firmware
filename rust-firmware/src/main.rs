@@ -631,10 +631,15 @@ fn maybe_remind_due_todos(
     let due: Vec<&Todo> = list
         .iter()
         .filter(|t| {
-            !t.done
-                && t.importance == Importance::High
-                && t.due_date
-                    .is_some_and(|d| d.month == now.month && d.day == now.day)
+            if t.done || t.importance != Importance::High {
+                return false;
+            }
+            match &t.repeat {
+                Some(r) => r.fires_on(now.year, now.month, now.day, now.weekday),
+                None => t.due_date.is_some_and(|d| {
+                    d.year == now.year && d.month == now.month && d.day == now.day
+                }),
+            }
         })
         .collect();
     if due.is_empty() {
