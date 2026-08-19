@@ -272,18 +272,16 @@ impl Note4Board {
         self.charge_snapshot
     }
 
-    /// Drives the status LED (GPIO3) as an external-power indicator: lit
-    /// whenever a charger is connected (charging or already full), off
-    /// once it's unplugged. `LED_G` is active-low (low = on, matching the
-    /// official demo's `SetPowerLed(on)` -> level 0); the official
-    /// firmware names this pin `ZECTRIX_POWER_LED` and keeps it off
-    /// except during self-test, and "power plugged in" is the semantics
-    /// that matches user expectation (on while plugged in, off when
-    /// unplugged). Previously the LED was set high once at boot and never
-    /// touched again (a leftover from before the UI rewrite removed the
-    /// old heartbeat-blink behavior).
+    /// Drives the status LED (GPIO3) as a charging indicator: lit only
+    /// while a charger is connected **and** the battery is still charging,
+    /// dark once full or unplugged. `LED_G` is active-low (low = on,
+    /// matching the official demo's `SetPowerLed(on)` -> level 0); the
+    /// official firmware names this pin `ZECTRIX_POWER_LED` and keeps it
+    /// off except during self-test. A plugged-in-but-full state doesn't
+    /// keep a bright indicator burning all day - the battery icon on the
+    /// Home screen already shows the full state.
     pub fn update_charging_led(&mut self, charge: ChargeSnapshot) -> Result<()> {
-        if charge.power_present {
+        if charge.power_present && !charge.full {
             self.led.set_low()?;
         } else {
             self.led.set_high()?;
