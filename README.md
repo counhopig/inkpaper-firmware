@@ -39,10 +39,10 @@ content from the server.
 
 ```mermaid
 flowchart LR
-    D[inkpaper-firmware<br/>Zectrix Note 4] -->|HTTPS POST /api/sync<br/>upload done/enabled flags| S[inkpaper-server<br/>Rust + axum + SQLite]
-    S -->"JSON alarms + todos" D
-    T[inkpaper-desktop<br/>Tauri 2 + Vue 3] -->|USB serial / BLE<br/>set_wifi, set_server, sync_now| D
-    T -->|HTTPS admin API<br/>ADMIN_TOKEN| S
+    D["inkpaper-firmware<br/>Zectrix Note 4"] -->|"HTTPS POST /api/sync (done/enabled flags)"| S["inkpaper-server<br/>Rust + axum + SQLite"]
+    S -->|"JSON alarms + todos"| D
+    T["inkpaper-desktop<br/>Tauri 2 + Vue 3"] -->|"USB serial / BLE (set_wifi, set_server, sync_now)"| D
+    T -->|"HTTPS admin API (ADMIN_TOKEN)"| S
 ```
 
 - **this repo (`inkpaper-firmware`)** — the Note 4 firmware (Rust, esp-idf).
