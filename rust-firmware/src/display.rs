@@ -47,22 +47,19 @@ impl EpdDisplay {
         &mut self.canvas
     }
 
-    /// The idle/background screen: clock + weekday, Wi-Fi/battery status,
-    /// next-alarm summary (time, repeat pattern, countdown), and a todos
-    /// summary (open count, due-today count, high-priority count).
-    /// `main.rs` redraws this after returning from any modal screen (the
-    /// navigation drawer, settings menu, alarm ring).
+    /// The idle/background screen: clock, Wi-Fi/battery status, next-alarm
+    /// summary (time, countdown), and a todos summary (open count,
+    /// due-today count). `main.rs` redraws this after returning from any
+    /// modal screen (the navigation drawer, settings menu, alarm ring).
     #[allow(clippy::too_many_arguments)]
     pub fn render_home(
         &mut self,
         clock: Option<&DateTime>,
         next_alarm_time: Option<&str>,
-        next_alarm_repeat: Option<&str>,
         next_alarm_date: Option<&str>,
         next_alarm_days_left: Option<i64>,
         todo_pending: usize,
         todo_due_today: usize,
-        todo_high_pending: usize,
         wifi_configured: bool,
         battery_percent: Option<u8>,
         charge: ChargeSnapshot,
@@ -120,14 +117,20 @@ impl EpdDisplay {
         }
 
         // Cards reach down to a real bottom margin (300-269=31px, matching
-        // the header's own rhythm). Each card now carries three lines:
-        // a big primary value and two smaller schedule/stat captions.
+        // the header's own rhythm). Both cards share the same two-line
+        // shape - a big primary value and one caption below it - so they
+        // read as a matched pair instead of one running a line longer.
         const CARD_TOP: usize = 139;
         const CARD_H: usize = 130;
         const CARD_W: usize = 176;
         // Value column width available before text would run into the
         // card's own right edge (or, worse, the neighboring card).
         const VALUE_MAX_WIDTH: usize = 152;
+        // Caption sits centered in the leftover space below the value
+        // (value ink ends around CARD_TOP+83, the card's bottom border is
+        // at CARD_TOP+130) rather than right under it - at +88 the caption
+        // hugged the value with a lot of dead air beneath it, unbalanced.
+        const CAPTION_Y: usize = 98;
 
         self.canvas.stroke_rect(16, CARD_TOP, CARD_W, CARD_H, 2);
         self.canvas.fill_rect(16, CARD_TOP, 5, CARD_H, true);
@@ -136,15 +139,6 @@ impl EpdDisplay {
         match next_alarm_time {
             Some(time) => {
                 draw_value_centered(&mut self.canvas, 32, CARD_TOP + 44, VALUE_MAX_WIDTH, time);
-                if let Some(repeat) = next_alarm_repeat {
-                    let w = Canvas::text_prop_width(repeat, 1);
-                    self.canvas.draw_text_prop(
-                        32 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
-                        CARD_TOP + 88,
-                        1,
-                        repeat,
-                    );
-                }
                 let caption = match (next_alarm_date, next_alarm_days_left) {
                     (None, _) => "EVERY DAY".to_string(),
                     (Some(_), Some(0)) => "TODAY".to_string(),
@@ -154,7 +148,7 @@ impl EpdDisplay {
                 let w = Canvas::text_prop_width(&caption, 1);
                 self.canvas.draw_text_prop(
                     32 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
-                    CARD_TOP + 110,
+                    CARD_TOP + CAPTION_Y,
                     1,
                     &caption,
                 );
@@ -167,12 +161,8 @@ impl EpdDisplay {
                 // than the inner value column, so the long caption visually
                 // matches the big "NONE" rather than hugging the left edge.
                 let card_center_x = 16 + CARD_W / 2;
-                self.canvas.draw_text_prop(
-                    card_center_x - w / 2,
-                    CARD_TOP + 96,
-                    1,
-                    caption,
-                );
+                self.canvas
+                    .draw_text_prop(card_center_x - w / 2, CARD_TOP + CAPTION_Y, 1, caption);
             }
         }
 
@@ -194,40 +184,35 @@ impl EpdDisplay {
         let w = Canvas::text_prop_width(&due_caption, 1);
         self.canvas.draw_text_prop(
             right_x + 16 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
-            CARD_TOP + 88,
+            CARD_TOP + CAPTION_Y,
             1,
             &due_caption,
-        );
-        let high_caption = format!("HIGH {}", todo_high_pending);
-        let w = Canvas::text_prop_width(&high_caption, 1);
-        self.canvas.draw_text_prop(
-            right_x + 16 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
-            CARD_TOP + 110,
-            1,
-            &high_caption,
         );
     }
 
     fn draw_clock(&mut self, dt: &DateTime) {
         let time = format!("{:02}:{:02}", dt.hour, dt.minute);
-        self.canvas.draw_text_prop(24, 44, 4, &time);
-
-        // Weekday under the clock, left-aligned to match it - the date
-        // stays on the right so the two don't compete. Small-caption scale
-        // (matching the cards' value/caption pattern below) so it clears
-        // the clock's 64px-tall glyphs (44..108) instead of overlapping
-        // them the way scale 2 did.
-        let weekday = WEEKDAYS[(dt.weekday as usize).min(6)];
-        self.canvas.draw_text_prop(24, 114, 1, weekday);
+        // Bigger clock on the left; the date stacks as two lines on the
+        // right, sized down a step per line (matching the scale other
+        // secondary captions use elsewhere on this screen) so its width
+        // stays well clear of the clock's ink even on the widest
+        // time/weekday combinations - a scale-2 second line can run wide
+        // enough to overlap the clock digits.
+        self.canvas.draw_text_prop(24, 46, 5, &time);
 
         let m_idx = (dt.month as usize).saturating_sub(1).min(11);
         let md = format!("{} {}", MONTH_NAMES[m_idx], dt.day);
-        let year = format!("{}", dt.year);
+        let year_wed = format!("{} · {}", dt.year, WEEKDAYS[(dt.weekday as usize).min(6)]);
         let md_w = Canvas::text_prop_width(&md, 2);
-        let year_w = Canvas::text_prop_width(&year, 2);
-        self.canvas.draw_text_prop(WIDTH - md_w - 24, 46, 2, &md);
+        let year_wed_w = Canvas::text_prop_width(&year_wed, 1);
+        // The two-line date block (32px + 6px gap + 16px = 54px tall) is
+        // centered against the clock's 80px height (16px glyph * scale 5)
+        // rather than sharing its top edge - top-aligning left it hugging
+        // the top of the row with dead space below, unbalanced next to the
+        // clock that fills the full height.
+        self.canvas.draw_text_prop(WIDTH - md_w - 24, 59, 2, &md);
         self.canvas
-            .draw_text_prop(WIDTH - year_w - 24, 84, 2, &year);
+            .draw_text_prop(WIDTH - year_wed_w - 24, 97, 1, &year_wed);
     }
 
     pub fn refresh_full(&mut self) -> Result<()> {

@@ -306,16 +306,16 @@ fn draw_value_centered(canvas: &mut Canvas, x: usize, y: usize, max_width: usize
 
 fn draw_clock(canvas: &mut Canvas, dt: Now) {
     let time = format!("{:02}:{:02}", dt.hour, dt.minute);
-    canvas.draw_text_prop(24, 44, 4, &time);
-    let weekday = WEEKDAYS[(dt.weekday as usize).min(6)];
-    canvas.draw_text_prop(24, 114, 1, weekday);
+    // Bigger clock on the left; the two-line date block on the right is
+    // vertically centered against the clock's height, not top-aligned.
+    canvas.draw_text_prop(24, 46, 5, &time);
     let m_idx = (dt.month as usize).saturating_sub(1).min(11);
     let md = format!("{} {}", MONTH_NAMES[m_idx], dt.day);
-    let year = format!("{}", dt.year);
+    let year_wed = format!("{} · {}", dt.year, WEEKDAYS[(dt.weekday as usize).min(6)]);
     let md_w = Canvas::text_prop_width(&md, 2);
-    let year_w = Canvas::text_prop_width(&year, 2);
-    canvas.draw_text_prop(WIDTH - md_w - 24, 46, 2, &md);
-    canvas.draw_text_prop(WIDTH - year_w - 24, 84, 2, &year);
+    let year_wed_w = Canvas::text_prop_width(&year_wed, 1);
+    canvas.draw_text_prop(WIDTH - md_w - 24, 59, 2, &md);
+    canvas.draw_text_prop(WIDTH - year_wed_w - 24, 97, 1, &year_wed);
 }
 
 /// Mirrors `display.rs`'s `render_home`; icons parsed from `icons.rs`.
@@ -324,12 +324,10 @@ fn render_home(
     icons: &HomeIcons,
     clock: Option<Now>,
     next_alarm_time: Option<&str>,
-    next_alarm_repeat: Option<&str>,
     next_alarm_date: Option<&str>,
     next_alarm_days_left: Option<i64>,
     todo_pending: usize,
     todo_due_today: usize,
-    todo_high_pending: usize,
     wifi_configured: bool,
     battery_percent: Option<u8>,
     charging: bool,
@@ -379,6 +377,11 @@ fn render_home(
     const CARD_H: usize = 130;
     const CARD_W: usize = 176;
     const VALUE_MAX_WIDTH: usize = 152;
+    // Caption sits centered in the leftover space below the value (value
+    // ink ends around CARD_TOP+83, the card's bottom border is at
+    // CARD_TOP+130) rather than right under it - at +88 the caption hugged
+    // the value with a lot of dead air beneath it, unbalanced.
+    const CAPTION_Y: usize = 98;
 
     canvas.stroke_rect(16, CARD_TOP, CARD_W, CARD_H, 2);
     canvas.fill_rect(16, CARD_TOP, 5, CARD_H, true);
@@ -386,15 +389,6 @@ fn render_home(
     match next_alarm_time {
         Some(time) => {
             draw_value_centered(canvas, 32, CARD_TOP + 44, VALUE_MAX_WIDTH, time);
-            if let Some(repeat) = next_alarm_repeat {
-                let w = Canvas::text_prop_width(repeat, 1);
-                canvas.draw_text_prop(
-                    32 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
-                    CARD_TOP + 88,
-                    1,
-                    repeat,
-                );
-            }
             let caption = match (next_alarm_date, next_alarm_days_left) {
                 (None, _) => "EVERY DAY".to_string(),
                 (Some(_), Some(0)) => "TODAY".to_string(),
@@ -404,7 +398,7 @@ fn render_home(
             let w = Canvas::text_prop_width(&caption, 1);
             canvas.draw_text_prop(
                 32 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
-                CARD_TOP + 110,
+                CARD_TOP + CAPTION_Y,
                 1,
                 &caption,
             );
@@ -413,7 +407,7 @@ fn render_home(
             draw_value_centered(canvas, 32, CARD_TOP + 44, VALUE_MAX_WIDTH, "NONE");
             let w = Canvas::text_prop_width("NO ALARMS SET", 1);
             let card_center_x = 16 + CARD_W / 2;
-            canvas.draw_text_prop(card_center_x - w / 2, CARD_TOP + 96, 1, "NO ALARMS SET");
+            canvas.draw_text_prop(card_center_x - w / 2, CARD_TOP + CAPTION_Y, 1, "NO ALARMS SET");
         }
     }
 
@@ -426,17 +420,9 @@ fn render_home(
     let w = Canvas::text_prop_width(&due_caption, 1);
     canvas.draw_text_prop(
         right_x + 16 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
-        CARD_TOP + 88,
+        CARD_TOP + CAPTION_Y,
         1,
         &due_caption,
-    );
-    let high_caption = format!("HIGH {}", todo_high_pending);
-    let w = Canvas::text_prop_width(&high_caption, 1);
-    canvas.draw_text_prop(
-        right_x + 16 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
-        CARD_TOP + 110,
-        1,
-        &high_caption,
     );
 }
 
@@ -1000,12 +986,10 @@ fn main() -> io::Result<()> {
         &icons,
         Some(now),
         Some("07:30"),
-        Some("SU,WE,FR"),
         Some("08/21"),
         Some(2),
         3,
         2,
-        1,
         true,
         Some(80),
         false,
@@ -1021,10 +1005,8 @@ fn main() -> io::Result<()> {
         None,
         None,
         None,
-        None,
         5,
         0,
-        2,
         true,
         Some(35),
         false,
@@ -1041,8 +1023,6 @@ fn main() -> io::Result<()> {
         None,
         None,
         None,
-        None,
-        0,
         0,
         0,
         false,

@@ -236,12 +236,10 @@ fn browse_page(
                     board.display.render_home(
                         now,
                         next_alarm.as_ref().map(|label| label.time.as_str()),
-                        next_alarm.as_ref().map(|label| label.repeat.as_str()),
                         next_alarm.as_ref().and_then(|label| label.date.as_deref()),
                         next_alarm.as_ref().map(|label| label.days_left),
                         todo_summary.pending,
                         todo_summary.due_today,
-                        todo_summary.high_pending,
                         wifi_configured,
                         battery_percent,
                         charge,
@@ -283,7 +281,10 @@ fn browse_page(
                         cal_selected_day = cal_selected_day.min(days_in_month).max(1);
                         draw_month_grid(canvas, dt.year, dt.month, now, cal_selected_day, &marks);
                     }
-                    footer(canvas, "UP/DOWN MOVE   ENTER WEEK VIEW   HOLD UP/DOWN SWITCH PAGE");
+                    footer(
+                        canvas,
+                        "UP/DOWN MOVE   ENTER WEEK VIEW   HOLD UP/DOWN SWITCH PAGE",
+                    );
                 }
                 Page::Alarms => render_alarm_page(board, alarm_store, alarm_selected),
                 Page::Todos => render_todo_page(board, todo_store, todo_selected, now),
@@ -951,14 +952,12 @@ fn ble_pairing_screen(
 
 /// Next enabled alarm's summary for the Home screen card: the time plus
 /// enough schedule detail to say *when* without opening the alarm page -
-/// repeat pattern, next firing date, and how many days out it is.
+/// next firing date, and how many days out it is.
 pub struct NextAlarmLabel {
     pub time: String,
     /// Next firing date as `MM/DD` (only when the schedule has a specific
     /// date to name - Weekly/Monthly/Once).
     pub date: Option<String>,
-    /// Repeat summary: `DAILY`, `SU,WE,FR`, `DAY 1,15`, or `ONCE`.
-    pub repeat: String,
     /// Whole days from today until the next firing (0 = today).
     pub days_left: i64,
 }
@@ -973,56 +972,40 @@ pub fn next_alarm_label(store: &AlarmStore, now: &DateTime) -> Option<NextAlarmL
     };
     alarms::next_due(&list, now).map(|alarm| {
         let time = format!("{:02}:{:02}", alarm.hour, alarm.minute);
-        let (date, repeat, days_left) = match &alarm.repeat {
-            Repeat::Daily => (None, "DAILY".to_string(), 0),
-            Repeat::Weekly { days } => {
+        let (date, days_left) = match &alarm.repeat {
+            Repeat::Daily => (None, 0),
+            Repeat::Weekly { .. } => {
                 let (year, month, day, _) = alarms::next_occurrence_date(&alarm.repeat, now);
-                let summary = days
-                    .iter()
-                    .map(|d| WEEKDAY_SHORT[*d as usize])
-                    .collect::<Vec<_>>()
-                    .join(",");
                 (
                     Some(format!("{:02}/{:02}", month, day)),
-                    summary,
                     alarms::days_until(year, month, day, now),
                 )
             }
-            Repeat::Monthly { days } => {
+            Repeat::Monthly { .. } => {
                 let (year, month, day, _) = alarms::next_occurrence_date(&alarm.repeat, now);
-                let summary = days
-                    .iter()
-                    .map(|d| d.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
                 (
                     Some(format!("{:02}/{:02}", month, day)),
-                    format!("DAY {summary}"),
                     alarms::days_until(year, month, day, now),
                 )
             }
             Repeat::Once { year, month, day } => (
                 Some(format!("{:02}/{:02}", month, day)),
-                "ONCE".to_string(),
                 alarms::days_until(*year, *month, *day, now),
             ),
         };
         NextAlarmLabel {
             time,
             date,
-            repeat,
             days_left,
         }
     })
 }
 
 /// Aggregated todo stats for the Home screen's OPEN TODOS card: how many
-/// are still open, how many of those are due today, and how many of those
-/// are high priority.
+/// are still open, and how many of those are due today.
 pub struct TodoSummary {
     pub pending: usize,
     pub due_today: usize,
-    pub high_pending: usize,
 }
 
 pub fn todo_summary(store: &TodoStore, now: Option<&DateTime>) -> TodoSummary {
@@ -1030,22 +1013,17 @@ pub fn todo_summary(store: &TodoStore, now: Option<&DateTime>) -> TodoSummary {
         return TodoSummary {
             pending: 0,
             due_today: 0,
-            high_pending: 0,
         };
     };
     let mut summary = TodoSummary {
         pending: 0,
         due_today: 0,
-        high_pending: 0,
     };
     for todo in &list {
         if todo.done {
             continue;
         }
         summary.pending += 1;
-        if todo.importance == Importance::High {
-            summary.high_pending += 1;
-        }
         if todo_due_today(todo, now) {
             summary.due_today += 1;
         }
