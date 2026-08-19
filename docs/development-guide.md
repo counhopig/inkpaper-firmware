@@ -252,7 +252,7 @@ zectrix_epd_power_off
 > 根 README 和 `rust-firmware/AGENTS.md` 为准，本节不重复维护。
 
 - `main.rs` 主循环以 `POLL_INTERVAL_MS = 20`（ms）轮询三按键；按键事件用 `Option<ButtonEvent>` 携带。短按在 Home 上无动作，长按 UP/DOWN 打开导航抽屉（`screens::open_navigation`），需要重绘时把对应 `Rect` 收进 `dirty` 列表，一轮结束后统一发起局刷/全刷。
-- `board.rs::take()` 集中初始化：电源锁存拉高、AVDD 拉低（关闭，待 I2C0 初始化前再拉高）、按键走 `Pull::Up`、`charging` 走 `Pull::Up`、`charge_done` 浮空输入。设备端已不驱动状态 LED（`set_led`/`_led` 字段在 UI 重写时一并移除）。
+- `board.rs::take()` 集中初始化：电源锁存拉高、AVDD 拉低（关闭，待 I2C0 初始化前再拉高）、按键走 `Pull::Up`、`charging` 走 `Pull::Up`、`charge_done` 浮空输入。状态 LED（`GPIO3`，active-low，官方命名为 `ZECTRIX_POWER_LED`）由 `update_charging_led` 驱动为外部电源指示：插着电源亮、拔掉灭。
 
 ### 存储与电源状态
 

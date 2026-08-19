@@ -158,8 +158,8 @@ impl Note4Board {
         let mut power_latch = PinDriver::output(pins.gpio17)?;
         power_latch.set_high()?;
 
-        // Starts high (matches the previous always-on behavior) until the
-        // first `update_charging_led` call in the main loop takes over.
+        // Starts off (`LED_G` is active-low) until the first
+        // `update_charging_led` call in the main loop takes over.
         let mut led = PinDriver::output(pins.gpio3)?;
         led.set_high()?;
 
@@ -272,19 +272,21 @@ impl Note4Board {
         self.charge_snapshot
     }
 
-    /// Drives the status LED (GPIO3) from the charge-management IC's own
-    /// pins: lit while actively charging, off once charge is complete or
-    /// when not on power at all. Previously the LED was set high once at
-    /// boot and never touched again (a leftover from before the UI
-    /// rewrite removed the old heartbeat-blink behavior); this gives it a
-    /// purpose again without adding a timer/blink pattern - a single
-    /// `PinDriver::set_high`/`set_low` call per `report_power_state` poll
-    /// is enough for a binary "charging or not" signal.
+    /// Drives the status LED (GPIO3) as an external-power indicator: lit
+    /// whenever a charger is connected (charging or already full), off
+    /// once it's unplugged. `LED_G` is active-low (low = on, matching the
+    /// official demo's `SetPowerLed(on)` -> level 0); the official
+    /// firmware names this pin `ZECTRIX_POWER_LED` and keeps it off
+    /// except during self-test, and "power plugged in" is the semantics
+    /// that matches user expectation (on while plugged in, off when
+    /// unplugged). Previously the LED was set high once at boot and never
+    /// touched again (a leftover from before the UI rewrite removed the
+    /// old heartbeat-blink behavior).
     pub fn update_charging_led(&mut self, charge: ChargeSnapshot) -> Result<()> {
-        if charge.charging {
-            self.led.set_high()?;
-        } else {
+        if charge.power_present {
             self.led.set_low()?;
+        } else {
+            self.led.set_high()?;
         }
         Ok(())
     }
