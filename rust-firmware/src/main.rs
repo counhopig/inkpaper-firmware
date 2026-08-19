@@ -31,7 +31,7 @@ use canvas::Rect;
 use esp_idf_svc::systime::EspSystemTime;
 use rtc::DateTime;
 use storage::PersistedCounters;
-use todos::TodoStore;
+use todos::{Importance, Todo, TodoStore};
 
 /// Poll cycles between two consecutive `power status` log lines.
 /// 50 × 20 ms = 1 s.
@@ -280,7 +280,9 @@ fn main() -> Result<()> {
         // Periodic auto-sync check every 30 s (1500 × 20 ms). The check
         // itself is cheap (two NVS reads); the actual sync only runs when
         // the elapsed time since the last one exceeds the configured
-        // interval (see `screens.rs`'s SYNC INTERVAL setting).
+        // interval (see `screens.rs`'s SYNC INTERVAL setting). The due-todo
+        // reminder rides the same cadence - it too must not fire mid-menu,
+        // and this is the only place the main loop is guaranteed idle.
         auto_sync_tick += 1;
         if auto_sync_tick >= 1500 {
             auto_sync_tick = 0;
@@ -292,6 +294,7 @@ fn main() -> Result<()> {
                 &todo_store,
                 clock.as_ref(),
             );
+            maybe_remind_due_todos(&mut board, &counters, &todo_store, clock.as_ref());
         }
 
         let mut dirty: Vec<Rect> = Vec::new();
@@ -598,4 +601,90 @@ fn ring_alarm_until_dismissed(board: &mut Note4Board) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Checks - once per calendar day - whether any `High`-importance todo is
+/// due today and still open, and if so blocks the main loop on a "TODOS
+/// DUE" screen with a short tone burst until ENTER. The reminder date is
+/// recorded *before* the screen so a missed dismiss never re-rings on the
+/// next 30 s check. Runs only while the main loop is idle on Home (menus
+/// block the loop, so this can't interrupt them).
+fn maybe_remind_due_todos(
+    board: &mut Note4Board,
+    counters: &PersistedCounters,
+    todo_store: &TodoStore,
+    clock: Option<&DateTime>,
+) {
+    let Some(now) = clock else {
+        return;
+    };
+    let date_key = format!("{:04}{:02}{:02}", now.year, now.month, now.day);
+    match counters.todo_reminded_date() {
+        Ok(Some(prev)) if prev == date_key => return,
+        Ok(_) => {}
+        Err(err) => log::warn!("Failed to read todo reminder date: {err}"),
+    }
+
+    let Ok(list) = todo_store.load() else {
+        return;
+    };
+    let due: Vec<&Todo> = list
+        .iter()
+        .filter(|t| {
+            !t.done
+                && t.importance == Importance::High
+                && t.due_date
+                    .is_some_and(|d| d.month == now.month && d.day == now.day)
+        })
+        .collect();
+    if due.is_empty() {
+        return;
+    }
+
+    if let Err(err) = counters.set_todo_reminded_date(&date_key) {
+        log::warn!("Failed to record todo reminder date: {err}");
+    }
+    log::info!("{} high-importance todo(s) due today; reminding", due.len());
+    remind_due_todos_screen(board, &due);
+}
+
+/// Full-screen "TODOS DUE" with up to 7 due items, a short 3-note tone
+/// burst, then a blocking wait for ENTER (or long ENTER) - same shape as
+/// `ring_alarm_until_dismissed`, without the 5-minute timeout since these
+/// are far less urgent.
+fn remind_due_todos_screen(board: &mut Note4Board, due: &[&Todo]) {
+    let canvas = board.display.canvas_mut();
+    canvas.clear();
+    canvas.draw_text_prop(16, 40, 1, "INKPAPER");
+    canvas.draw_text_prop(16, 60, 2, "TODOS DUE");
+    for (i, todo) in due.iter().take(7).enumerate() {
+        // Truncate long text by chars so this can't split a UTF-8 codepoint.
+        let text: String = todo.text.chars().take(38).collect();
+        canvas.draw_text_prop(16, 100 + i * 24, 1, &format!("!! {text}"));
+    }
+    if due.len() > 7 {
+        canvas.draw_text_prop(16, 268, 1, "MORE...");
+    }
+    canvas.draw_text_prop(16, 284, 1, "ENTER = DISMISS");
+    let _ = board.display.refresh_full();
+
+    if let Some(audio) = board.audio.as_mut() {
+        for _ in 0..3 {
+            if let Err(err) = audio.play_sine_stereo(1046.0, 0.15, 8000) {
+                log::warn!("Todo reminder tone failed: {err}");
+                break;
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+    }
+
+    loop {
+        watchdog::feed();
+        if let Some(event) = board.key_enter.poll() {
+            if matches!(event, ButtonEvent::Pressed | ButtonEvent::LongPressed) {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
+    }
 }

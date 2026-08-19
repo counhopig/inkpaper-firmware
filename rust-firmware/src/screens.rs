@@ -8,7 +8,7 @@ use crate::display::Rect;
 use crate::rtc::{is_leap, DateTime};
 use crate::storage::PersistedCounters;
 use crate::sync;
-use crate::todos::TodoStore;
+use crate::todos::{Importance, TodoStore};
 use crate::ui::{
     draw_rows, footer, header, pick_from_list, pick_number, poll_nav, show_message, tick, Nav,
 };
@@ -274,7 +274,27 @@ fn browse_page(
                     canvas.clear();
                     header(canvas, "CALENDAR");
                     if let Some(dt) = now {
-                        draw_month_grid(canvas, dt.year, dt.month, now);
+                        let alarms = alarm_store.load().unwrap_or_default();
+                        let todos = todo_store.load().unwrap_or_default();
+                        // Day markers for the visible month: once-shot
+                        // alarms, and todos due that day (importance is
+                        // carried so the marker can be sized by it).
+                        let once_days: Vec<u8> = alarms
+                            .iter()
+                            .filter_map(|a| match a.repeat {
+                                Repeat::Once { month: m, day, .. } if m == dt.month => Some(day),
+                                _ => None,
+                            })
+                            .collect();
+                        let todo_due: Vec<(u8, Importance)> = todos
+                            .iter()
+                            .filter_map(|t| {
+                                t.due_date.and_then(|d| {
+                                    (d.month == dt.month).then_some((d.day, t.importance))
+                                })
+                            })
+                            .collect();
+                        draw_month_grid(canvas, dt.year, dt.month, now, &once_days, &todo_due);
                     }
                     footer(canvas, "HOLD UP/DOWN SWITCH PAGE");
                 }
@@ -316,11 +336,18 @@ fn browse_page(
                 needs_redraw = true;
             }
             Nav::Cancel => {
-                if page == Page::Home {
+                if page == Page::Todos {
+                    // Long ENTER cycles a todo's importance (Low -> Medium
+                    // -> High) instead of leaving the page - long UP/DOWN
+                    // opens the navigation drawer, which is the way out.
+                    cycle_todo_importance(todo_store, todo_selected);
+                    needs_redraw = true;
+                } else if page == Page::Home {
                     return;
+                } else {
+                    page = Page::Home;
+                    needs_redraw = true;
                 }
-                page = Page::Home;
-                needs_redraw = true;
             }
             Nav::Up => match page {
                 Page::Alarms => {
@@ -364,12 +391,17 @@ fn browse_page(
 }
 
 /// Read-only current-month grid, today highlighted. No month navigation in
-/// v1 - the device always shows "now".
+/// v1 - the device always shows "now". Day cells carry small markers under
+/// the date number: a solid block left of center for a once-shot alarm,
+/// another (larger for High importance) for a todo due that day - the
+/// calendar is where alarms and todos meet.
 fn draw_month_grid(
     canvas: &mut crate::canvas::Canvas,
     year: u16,
     month: u8,
     today: Option<&DateTime>,
+    once_alarm_days: &[u8],
+    todo_due: &[(u8, Importance)],
 ) {
     let title = format!("{:04} / {:02}", year, month);
     canvas.draw_text_prop(16, 38, 2, &title);
@@ -409,6 +441,17 @@ fn draw_month_grid(
             canvas.fill_rect(x.saturating_sub(6), y.saturating_sub(6), 4, 26, true);
         }
         canvas.draw_text_prop(x, y, 1, &text);
+        if once_alarm_days.contains(&day) {
+            canvas.fill_rect(x, y + 13, 4, 4, true);
+        }
+        if let Some((_, importance)) = todo_due.iter().find(|(d, _)| *d == day) {
+            let size = if *importance == Importance::High {
+                6
+            } else {
+                4
+            };
+            canvas.fill_rect(x + 9, y + 13, size, size, true);
+        }
         col += 1;
         if col > 6 {
             col = 0;
@@ -496,14 +539,23 @@ fn render_todo_page(board: &mut Note4Board, store: &TodoStore, selected: usize) 
         .load()
         .unwrap_or_default()
         .iter()
-        .map(|todo| {
-            let mark = if todo.done { "[X]" } else { "[ ]" };
-            format!("{mark} {}", todo.text)
-        })
+        .map(format_todo_row)
         .collect();
     let canvas = board.display.canvas_mut();
     draw_rows(canvas, "TODOS", &items, selected);
-    footer(canvas, "UP/DOWN MOVE   ENTER OK   HOLD UP/DOWN PAGE");
+    footer(canvas, "ENTER DONE   HOLD ENTER IMPORTANCE");
+}
+
+/// `[X]`/`[ ]` plus a `!!`/`!` importance suffix (low gets none), then the
+/// text - the same "marker then value" shape the alarm page uses.
+fn format_todo_row(todo: &crate::todos::Todo) -> String {
+    let mark = if todo.done { "[X]" } else { "[ ]" };
+    let imp = match todo.importance {
+        crate::todos::Importance::Low => "",
+        crate::todos::Importance::Medium => "! ",
+        crate::todos::Importance::High => "!! ",
+    };
+    format!("{mark} {imp}{}", todo.text)
 }
 
 fn activate_todo_row(store: &TodoStore, selected: usize) {
@@ -512,6 +564,25 @@ fn activate_todo_row(store: &TodoStore, selected: usize) {
         return;
     };
     todo.done = !todo.done;
+    if let Err(err) = store.save(&list) {
+        log::warn!("Failed to save todos: {err}");
+    }
+}
+
+/// Long-ENTER action: cycle the selected todo's importance
+/// Low -> Medium -> High -> Low and persist. The device can't edit text,
+/// but importance is cheap to express with the three-button set.
+fn cycle_todo_importance(store: &TodoStore, selected: usize) {
+    let mut list = store.load().unwrap_or_default();
+    let Some(todo) = list.get_mut(selected) else {
+        return;
+    };
+    todo.importance = match todo.importance {
+        crate::todos::Importance::Low => crate::todos::Importance::Medium,
+        crate::todos::Importance::Medium => crate::todos::Importance::High,
+        crate::todos::Importance::High => crate::todos::Importance::Low,
+    };
+    log::info!("Todo id={} importance now {:?}", todo.id, todo.importance);
     if let Err(err) = store.save(&list) {
         log::warn!("Failed to save todos: {err}");
     }

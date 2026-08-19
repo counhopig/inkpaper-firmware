@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::alarms::{self, AlarmStore, StoredAlarm};
 use crate::rtc::{DateTime, Pcf8563};
 use crate::storage::PersistedCounters;
-use crate::todos::{Todo, TodoStore};
+use crate::todos::{Importance, Todo, TodoStore};
 use crate::watchdog;
 use crate::wifi;
 
@@ -64,6 +64,11 @@ struct DeviceAlarmState {
 struct DeviceTodoState {
     id: u8,
     done: bool,
+    /// The device may cycle importance on-device; the server merges it.
+    /// Serialized as `Some(..)` always by the current firmware, but kept
+    /// optional so an older firmware's upload (without the field) is still
+    /// wire-compatible on the server side.
+    importance: Option<Importance>,
 }
 
 /// Fetches alarms and todos from `server_url`, applying conditional-request
@@ -110,6 +115,10 @@ pub fn fetch_and_apply(
             .map(|todo| DeviceTodoState {
                 id: todo.id,
                 done: todo.done,
+                // The device owns the todo's importance (long-ENTER cycles
+                // it in `screens.rs`), so it's uploaded for the server to
+                // merge.
+                importance: Some(todo.importance),
             })
             .collect(),
     };

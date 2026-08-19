@@ -9,11 +9,36 @@ const NAMESPACE: &str = "inkpaper_todo";
 const KEY_TODOS: &str = "todos";
 const BLOB_BUF_LEN: usize = 2048;
 
+/// Todo importance, wire-compatible with the server's `models::Importance`
+/// (`"low"`/`"medium"`/`"high"`). `Medium` is the default so records synced
+/// from before importance existed keep a sane value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Importance {
+    Low,
+    #[default]
+    Medium,
+    High,
+}
+
+/// Optional due date - month/day without a year. The calendar page draws a
+/// marker on that day of the month, and a `High` todo due today triggers a
+/// one-shot reminder in `main.rs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoDue {
+    pub month: u8,
+    pub day: u8,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Todo {
     pub id: u8,
     pub text: String,
     pub done: bool,
+    #[serde(default)]
+    pub importance: Importance,
+    #[serde(default)]
+    pub due_date: Option<TodoDue>,
 }
 
 pub struct TodoStore {

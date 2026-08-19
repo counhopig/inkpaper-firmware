@@ -10,6 +10,7 @@ const KEY_SYNC_ETAG: &str = "sync_etag";
 const KEY_TIMEZONE_OFFSET: &str = "timezone_min";
 const KEY_SYNC_INTERVAL_MIN: &str = "sync_interval_min";
 const KEY_LAST_SYNC_EPOCH: &str = "last_sync_epoch";
+const KEY_TODO_REMINDED_DATE: &str = "todo_reminded_date";
 
 /// Maximum length of the NVS strings used for Wi-Fi credentials.
 /// ESP32-S3 NVS limits a single string item to ~4000 bytes; 64 chars is
@@ -221,5 +222,28 @@ impl PersistedCounters {
         self.nvs
             .set_str(KEY_TIMEZONE_OFFSET, &offset.to_string())
             .map_err(|e| anyhow!("NVS set_str({KEY_TIMEZONE_OFFSET}) failed: {e}"))
+    }
+
+    /// The last calendar date (as `YYYYMMDD`) on which the due-todo
+    /// reminder fired, if ever. `main.rs` compares it against today so a
+    /// due `High` todo rings once per day, not every poll.
+    pub fn todo_reminded_date(&self) -> Result<Option<String>> {
+        let mut buf = [0u8; 16];
+        match self
+            .nvs
+            .get_str(KEY_TODO_REMINDED_DATE, &mut buf)
+            .map_err(|e| anyhow!("NVS get_str({KEY_TODO_REMINDED_DATE}) failed: {e}"))?
+        {
+            Some(s) => Ok(Some(s.to_owned())),
+            None => Ok(None),
+        }
+    }
+
+    /// Records that the due-todo reminder fired on `date` (`YYYYMMDD`).
+    pub fn set_todo_reminded_date(&self, date: &str) -> Result<()> {
+        self.nvs
+            .set_str(KEY_TODO_REMINDED_DATE, date)
+            .map(|_| ())
+            .map_err(|e| anyhow!("NVS set_str({KEY_TODO_REMINDED_DATE}) failed: {e}"))
     }
 }

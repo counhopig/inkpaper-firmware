@@ -13,7 +13,7 @@ Content-Type: application/json
 
 {
   "alarms": [{"id": 0, "enabled": true}],
-  "todos": [{"id": 0, "done": true}]
+  "todos": [{"id": 0, "done": true, "importance": "high"}]
 }
 ```
 
@@ -21,8 +21,11 @@ Content-Type: application/json
 
 - **Authorization** (required): `Bearer {auth_token}` where `auth_token` is the
   authentication token configured on the device.
-- The device uploads only locally editable state: alarm `enabled` and todo
-  `done`. It never uploads text, schedules, additions, or deletions.
+- The device uploads only locally editable state: alarm `enabled`, todo
+  `done`, and todo `importance` (the device can cycle importance with a
+  long-ENTER in the Todos page; `importance` is optional in the upload and
+  old firmware that omits it is still accepted). It never uploads text,
+  schedules, additions, or deletions.
 - Unknown IDs are ignored, so stale device data cannot recreate content that
   Desktop or Server deleted.
 - The server merges these flags and returns its complete authoritative lists.
@@ -63,12 +66,19 @@ Returned when the server has new or updated content. Body is JSON shaped as:
     {
       "id": 0,
       "text": "Buy groceries",
-      "done": false
+      "done": false,
+      "importance": "medium",
+      "due_date": null
     },
     {
       "id": 1,
       "text": "Call home",
-      "done": true
+      "done": true,
+      "importance": "high",
+      "due_date": {
+        "month": 8,
+        "day": 19
+      }
     }
   ]
 }
@@ -99,6 +109,14 @@ Each todo object:
 - **`text`** (string): The todo's description or task text (may be empty, though
   that's not useful).
 - **`done`** (bool): Whether this todo is marked complete.
+- **`importance`** (enum, optional, default `"medium"`): One of `"low"`,
+  `"medium"`, or `"high"`. The device cycles it via long-ENTER on the Todos
+  page and uploads it back; the calendar page sizes the due marker by it, and
+  a `high` todo due today triggers a once-per-day on-device reminder.
+- **`due_date`** (object or null, optional, default `null`): `{ "month": u8,
+  "day": u8 }` — a month/day the todo is due. The device calendar draws a
+  marker on that day of the month; `high`-importance todos due today trigger
+  the reminder screen described above.
 
 #### ETag Header (optional)
 
