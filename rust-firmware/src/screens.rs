@@ -115,38 +115,112 @@ pub enum Page {
     Todos,
 }
 
-/// Opens the GO TO destination list, pre-selected on wherever you already
-/// are (`current`) instead of always resetting to HOME - so pressing ENTER
-/// with no further input just closes the drawer back onto the same page,
-/// and the highlighted row itself doubles as the "you are here" indicator.
-/// This used to hand-roll a partial-width overlay that "deliberately"
-/// didn't clear the canvas so the current page stayed visible to its
-/// right - in practice that just chopped whatever content started left of
-/// x=224 (a list row's text, a card) off mid-word, which read as broken
-/// rather than as useful context. A full-screen `pick_from_list`, the same
-/// component every other list in the app uses, reads as a normal screen
-/// instead.
+/// GO TO navigation bar geometry: a left-hand panel overlaid on the live
+/// page (which stays visible to its right) rather than a full screen.
+/// `refresh_partial` updates only this rect, so the underlying page's
+/// pixels stay put while the bar moves. Width 176 runs the bar's right edge
+/// exactly to the home screen's left card border (x=192), so the covered
+/// content ends at a clean boundary instead of leaving an orphaned sliver
+/// of card outline.
+const NAV_BAR_RECT: Rect = Rect {
+    x: 16,
+    y: 34,
+    width: 176,
+    height: 250,
+};
+const NAV_BAR_ROW_H: usize = 37;
+/// Destinations in row order; `selected` indexes straight into this, and
+/// `pick_navigation` maps `Page` onto the first four rows (SETTINGS is
+/// reached by selecting the fifth row, it has no `Page` of its own).
+const NAV_DESTINATIONS: [&str; 5] = ["HOME", "CALENDAR", "ALARMS", "TODOS", "SETTINGS"];
+
+/// Draws the left navigation bar on top of whatever the canvas currently
+/// holds - it deliberately does NOT clear the screen, so the current page
+/// stays visible to the right of the bar and reads as the overlay's
+/// background context. `selected` gets the same stroke + left-accent-bar
+/// chrome every other row in the app uses; since the bar opens pre-selected
+/// on the current page, that highlighted row doubles as the "you are here"
+/// marker.
+fn draw_navigation_bar(canvas: &mut Canvas, selected: usize) {
+    // Solid white fill hides whatever page content sits underneath the bar
+    // cleanly (no half-covered text), which is what makes it read as an
+    // overlay instead of a chopped-up screen.
+    canvas.fill_rect(
+        NAV_BAR_RECT.x as usize,
+        NAV_BAR_RECT.y as usize,
+        NAV_BAR_RECT.width as usize,
+        NAV_BAR_RECT.height as usize,
+        false,
+    );
+    canvas.draw_text_prop(24, 42, 1, "GO TO");
+    canvas.fill_rect(24, 58, NAV_BAR_RECT.width as usize - 16, 1, true);
+    let mut y = 64usize;
+    for (index, label) in NAV_DESTINATIONS.iter().enumerate() {
+        if index == selected {
+            canvas.stroke_rect(
+                22,
+                y,
+                NAV_BAR_RECT.width as usize - 12,
+                NAV_BAR_ROW_H - 2,
+                2,
+            );
+            canvas.fill_rect(22, y, 5, NAV_BAR_ROW_H - 2, true);
+        }
+        canvas.draw_text_prop(30, y + 10, 1, label);
+        y += NAV_BAR_ROW_H;
+    }
+}
+
+/// Opens the GO TO left-hand bar, pre-selected on wherever you already are
+/// (`current`) instead of always resetting to HOME - so pressing ENTER with
+/// no further input just closes the bar back onto the same page, and the
+/// highlighted row doubles as the "you are here" indicator. Unlike a
+/// full-screen list, the bar is drawn over the live page (see
+/// `draw_navigation_bar`) so you keep your place on screen while browsing
+/// destinations. Returns the chosen index, or `None` on hold-to-cancel.
 fn pick_navigation(board: &mut Note4Board, current: Page) -> Option<usize> {
-    let destinations = [
-        "HOME".to_string(),
-        "CALENDAR".to_string(),
-        "ALARMS".to_string(),
-        "TODOS".to_string(),
-        "SETTINGS".to_string(),
-    ];
     let current_index = match current {
         Page::Home => 0,
         Page::Calendar => 1,
         Page::Alarms => 2,
         Page::Todos => 3,
     };
-    pick_from_list(
-        board,
-        "GO TO",
-        &destinations,
-        "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
-        current_index,
-    )
+    let mut selected = current_index;
+    let mut needs_redraw = true;
+    loop {
+        if needs_redraw {
+            let canvas = board.display.canvas_mut();
+            draw_navigation_bar(canvas, selected);
+            let _ = board.display.refresh_partial(NAV_BAR_RECT);
+            needs_redraw = false;
+        }
+        match poll_nav(board) {
+            Nav::Up => {
+                selected = if selected == 0 {
+                    NAV_DESTINATIONS.len() - 1
+                } else {
+                    selected - 1
+                };
+                needs_redraw = true;
+            }
+            Nav::Down => {
+                selected = (selected + 1) % NAV_DESTINATIONS.len();
+                needs_redraw = true;
+            }
+            Nav::Enter => return Some(selected),
+            Nav::Cancel => return None,
+            Nav::PageUp => {
+                selected = 0;
+                needs_redraw = true;
+            }
+            Nav::PageDown => {
+                selected = NAV_DESTINATIONS.len() - 1;
+                needs_redraw = true;
+            }
+            Nav::None => {}
+        }
+        tick();
+    }
 }
 
 /// Opens the global navigation directory. Both long UP and long DOWN enter
