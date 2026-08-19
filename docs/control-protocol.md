@@ -189,10 +189,10 @@ reader.
 [INFO] Power latch is high; rendering home screen
 
 # PC sends a command (e.g., set Wi-Fi credentials)
->>IP {"cmd":"set_wifi","ssid":"MyNetwork","password":"SecurePassword"}
+>>IP {"cmd":"set_wifi","ssid":"<ssid>","password":"<password>"}
 
 # Device logs internal operations
-[INFO] USB control: Wi-Fi credentials saved for 'MyNetwork'
+[INFO] USB control: Wi-Fi credentials saved for '<ssid>'
 
 # Device sends reply
 <<IP {"status":"ok"}
@@ -205,7 +205,7 @@ reader.
 
 # PC queries device status
 >>IP {"cmd":"get_status"}
-<<IP {"status":"status","wifi_configured":true,"server_configured":true,"wifi_connected":false,"wifi_ssid":"MyNet","wifi_has_password":true,"server_url":"http://192.168.31.29:8080/api/sync","server_has_token":true,"timezone_offset_minutes":480}
+<<IP {"status":"status","wifi_configured":true,"server_configured":true,"wifi_connected":false,"wifi_ssid":"MySSID","wifi_has_password":true,"server_url":"http://192.168.1.10:8080/api/sync","server_has_token":true,"timezone_offset_minutes":480}
 ```
 
 ---
@@ -244,7 +244,7 @@ notifications are already message-delimited at the link layer).
    below - commands aren't dispatched while any menu screen is showing),
    the device processes the command and sends a reply via notification:
    ```
-   {"status":"status","wifi_configured":true,"server_configured":true,"wifi_connected":false,"wifi_ssid":"MyNet","wifi_has_password":true,"server_url":"http://192.168.31.29:8080/api/sync","server_has_token":true,"timezone_offset_minutes":480}
+   {"status":"status","wifi_configured":true,"server_configured":true,"wifi_connected":false,"wifi_ssid":"MySSID","wifi_has_password":true,"server_url":"http://192.168.1.10:8080/api/sync","server_has_token":true,"timezone_offset_minutes":480}
    ```
 
 ### Lifecycle

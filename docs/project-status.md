@@ -138,8 +138,8 @@ never lets device data create new content. Built-in `/` admin console
 the same paper-grey/ink-black design language as the Desktop app.
 
 **Deployed**: running on a LAN host (`ssh office-linux-server-local`, repo
-at `/home/tomzhu/Documents/mywork/inkpaper-server`, listening on
-`0.0.0.0:8080`, reachable on the LAN at `http://192.168.31.29:8080`).
+at `/path/to/inkpaper-server`, listening on
+`0.0.0.0:8080`, reachable on the LAN at `http://192.168.1.10:8080`).
 Deploy flow is `scp` changed sources, `cargo build --release` remotely,
 restart the process, `curl -f http://127.0.0.1:8080/health`. `.env` and
 `inkpaper.sqlite3` on the remote host must be preserved across deploys (not
