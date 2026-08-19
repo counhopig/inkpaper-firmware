@@ -109,7 +109,7 @@ impl AlarmStore {
 /// Absolute day number (proleptic Gregorian, epoch 1970-01-01) - only used
 /// to order alarms against each other, matching the calendar math already
 /// in `rtc::DateTime::from_unix`.
-fn days_since_epoch(year: u16, month: u8, day: u8) -> i64 {
+pub(crate) fn days_since_epoch(year: u16, month: u8, day: u8) -> i64 {
     let mut days: i64 = 0;
     for y in 1970..year as i64 {
         days += if is_leap(y) { 366 } else { 365 };
@@ -136,7 +136,7 @@ fn month_lengths(year: i64) -> [i64; 12] {
 
 /// Calendar date (year, month, day) for an absolute day number relative to
 /// 1970-01-01. Inverse of `days_since_epoch`.
-fn date_from_days(mut days: i64) -> (u16, u8, u8) {
+pub(crate) fn date_from_days(mut days: i64) -> (u16, u8, u8) {
     let mut year = 1970i64;
     loop {
         let dim = if is_leap(year) { 366 } else { 365 };
@@ -175,6 +175,13 @@ pub(crate) fn next_occurrence_date(repeat: &Repeat, now: &DateTime) -> (u16, u8,
         }
     }
     (now.year, now.month, now.day, now.weekday)
+}
+
+/// Whole days from `now` until the given calendar date (0 = today,
+/// negative = already passed). Used by the Home screen for the
+/// "in N days" alarm countdown.
+pub(crate) fn days_until(year: u16, month: u8, day: u8, now: &DateTime) -> i64 {
+    days_since_epoch(year, month, day) - days_since_epoch(now.year, now.month, now.day)
 }
 
 /// Minutes from `now` until `alarm` next fires, or `i64::MAX` if it's a

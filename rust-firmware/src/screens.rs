@@ -4,6 +4,7 @@
 
 use crate::alarms::{self, AlarmStore, Repeat, StoredAlarm};
 use crate::board::Note4Board;
+use crate::canvas::Canvas;
 use crate::display::Rect;
 use crate::rtc::{is_leap, DateTime};
 use crate::storage::PersistedCounters;
@@ -40,6 +41,7 @@ pub fn open_menu(
             "SETTINGS",
             &items,
             "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
+            0,
         ) else {
             return;
         };
@@ -86,6 +88,7 @@ fn sync_interval_screen(board: &mut Note4Board, counters: &PersistedCounters) {
         "SYNC INTERVAL",
         &items,
         "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
+        0,
     ) else {
         return;
     };
@@ -112,7 +115,18 @@ pub enum Page {
     Todos,
 }
 
-fn pick_navigation(board: &mut Note4Board) -> Option<usize> {
+/// Opens the GO TO destination list, pre-selected on wherever you already
+/// are (`current`) instead of always resetting to HOME - so pressing ENTER
+/// with no further input just closes the drawer back onto the same page,
+/// and the highlighted row itself doubles as the "you are here" indicator.
+/// This used to hand-roll a partial-width overlay that "deliberately"
+/// didn't clear the canvas so the current page stayed visible to its
+/// right - in practice that just chopped whatever content started left of
+/// x=224 (a list row's text, a card) off mid-word, which read as broken
+/// rather than as useful context. A full-screen `pick_from_list`, the same
+/// component every other list in the app uses, reads as a normal screen
+/// instead.
+fn pick_navigation(board: &mut Note4Board, current: Page) -> Option<usize> {
     let destinations = [
         "HOME".to_string(),
         "CALENDAR".to_string(),
@@ -120,63 +134,19 @@ fn pick_navigation(board: &mut Note4Board) -> Option<usize> {
         "TODOS".to_string(),
         "SETTINGS".to_string(),
     ];
-    let mut selected = 0usize;
-    let mut needs_redraw = true;
-    loop {
-        if needs_redraw {
-            let canvas = board.display.canvas_mut();
-
-            // Left navigation drawer. Deliberately do not clear the canvas:
-            // the current page remains visible to the right of the drawer.
-            canvas.fill_rect(0, 0, 224, 300, false);
-            canvas.fill_rect(216, 0, 2, 300, true);
-            // Same header convention as every content screen: title
-            // top-left at y=8, thin rule at y=29 - one consistent "top of
-            // a screen" landmark across the whole app instead of the
-            // drawer inventing its own layout.
-            canvas.draw_text_prop(16, 8, 1, "INKPAPER");
-            canvas.fill_rect(16, 29, 192, 1, true);
-            canvas.draw_text_prop(16, 40, 2, "GO TO");
-
-            let mut y = 88usize;
-            for (index, destination) in destinations.iter().enumerate() {
-                if index == selected {
-                    canvas.stroke_rect(12, y, 194, 34, 2);
-                    canvas.fill_rect(12, y, 5, 34, true);
-                } else {
-                    canvas.fill_rect(12, y, 194, 34, false);
-                }
-                canvas.draw_text_prop(28, y + 8, 1, destination);
-                y += 38;
-            }
-            let _ = board.display.refresh_partial(Rect {
-                x: 0,
-                y: 0,
-                width: 224,
-                height: 300,
-            });
-            needs_redraw = false;
-        }
-
-        match poll_nav(board) {
-            Nav::Up => {
-                selected = if selected == 0 {
-                    destinations.len() - 1
-                } else {
-                    selected - 1
-                };
-                needs_redraw = true;
-            }
-            Nav::Down => {
-                selected = (selected + 1) % destinations.len();
-                needs_redraw = true;
-            }
-            Nav::Enter => return Some(selected),
-            Nav::Cancel => return None,
-            Nav::PageUp | Nav::PageDown | Nav::None => {}
-        }
-        tick();
-    }
+    let current_index = match current {
+        Page::Home => 0,
+        Page::Calendar => 1,
+        Page::Alarms => 2,
+        Page::Todos => 3,
+    };
+    pick_from_list(
+        board,
+        "GO TO",
+        &destinations,
+        "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
+        current_index,
+    )
 }
 
 /// Opens the global navigation directory. Both long UP and long DOWN enter
@@ -191,7 +161,7 @@ pub fn open_navigation(
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
     loop {
-        let Some(selected) = pick_navigation(board) else {
+        let Some(selected) = pick_navigation(board, Page::Home) else {
             return;
         };
         match selected {
@@ -243,6 +213,9 @@ fn browse_page(
 ) {
     let mut alarm_selected = 0usize;
     let mut todo_selected = 0usize;
+    // Calendar day cursor - starts on today, moves with UP/DOWN, ENTER
+    // opens that day's week view. Only meaningful while `now` is known.
+    let mut cal_selected_day: u8 = now.map(|dt| dt.day).unwrap_or(1);
     let mut needs_redraw = true;
     let mut first_draw = true;
     loop {
@@ -250,6 +223,7 @@ fn browse_page(
             match page {
                 Page::Home => {
                     let next_alarm = now.and_then(|dt| next_alarm_label(alarm_store, dt));
+                    let todo_summary = todo_summary(todo_store, now);
                     let wifi_configured = counters
                         .wifi_creds()
                         .map(|creds| creds.is_some())
@@ -262,8 +236,12 @@ fn browse_page(
                     board.display.render_home(
                         now,
                         next_alarm.as_ref().map(|label| label.time.as_str()),
+                        next_alarm.as_ref().map(|label| label.repeat.as_str()),
                         next_alarm.as_ref().and_then(|label| label.date.as_deref()),
-                        pending_todo_count(todo_store),
+                        next_alarm.as_ref().map(|label| label.days_left),
+                        todo_summary.pending,
+                        todo_summary.due_today,
+                        todo_summary.high_pending,
                         wifi_configured,
                         battery_percent,
                         charge,
@@ -274,27 +252,16 @@ fn browse_page(
                     canvas.clear();
                     header(canvas, "CALENDAR");
                     if let Some(dt) = now {
-                        let alarms = alarm_store.load().unwrap_or_default();
                         let todos = todo_store.load().unwrap_or_default();
-                        // Day markers for the visible month. Alarms mark
-                        // every day their schedule covers; todos mark every
-                        // day they are due (repeat schedule, or their single
-                        // due date). Importance is carried so the marker can
-                        // be sized by it.
+                        // Day markers for the visible month: whether a todo
+                        // is due that day (repeat schedule, or its single
+                        // due date), carrying importance so the marker can
+                        // be sized by it. Alarms don't get a mark here - the
+                        // month grid is a todo-due overview; ENTER on a day
+                        // opens the week view for the specifics, and alarms
+                        // already have their own page.
                         let mut marks = [DayMark::default(); 32];
                         let days_in_month = days_in_month(dt.year, dt.month);
-                        for alarm in alarms.iter().filter(|a| a.enabled) {
-                            for day in 1..=days_in_month {
-                                if alarm.repeat.fires_on(
-                                    dt.year,
-                                    dt.month,
-                                    day,
-                                    weekday_of(dt.year, dt.month, day),
-                                ) {
-                                    marks[day as usize].alarm = true;
-                                }
-                            }
-                        }
                         for todo in todos.iter() {
                             for day in 1..=days_in_month {
                                 let fires = match &todo.repeat {
@@ -313,12 +280,13 @@ fn browse_page(
                                 }
                             }
                         }
-                        draw_month_grid(canvas, dt.year, dt.month, now, &marks);
+                        cal_selected_day = cal_selected_day.min(days_in_month).max(1);
+                        draw_month_grid(canvas, dt.year, dt.month, now, cal_selected_day, &marks);
                     }
-                    footer(canvas, "HOLD UP/DOWN SWITCH PAGE");
+                    footer(canvas, "UP/DOWN MOVE   ENTER WEEK VIEW   HOLD UP/DOWN SWITCH PAGE");
                 }
                 Page::Alarms => render_alarm_page(board, alarm_store, alarm_selected),
-                Page::Todos => render_todo_page(board, todo_store, todo_selected),
+                Page::Todos => render_todo_page(board, todo_store, todo_selected, now),
             }
             if first_draw {
                 let _ = board.display.refresh_full();
@@ -336,7 +304,7 @@ fn browse_page(
 
         match poll_nav(board) {
             Nav::PageUp | Nav::PageDown => {
-                match pick_navigation(board) {
+                match pick_navigation(board, page) {
                     Some(0) => return,
                     Some(1) => page = Page::Calendar,
                     Some(2) => page = Page::Alarms,
@@ -377,6 +345,10 @@ fn browse_page(
                     todo_selected = todo_selected.saturating_sub(1);
                     needs_redraw = true;
                 }
+                Page::Calendar => {
+                    cal_selected_day = cal_selected_day.saturating_sub(1).max(1);
+                    needs_redraw = true;
+                }
                 _ => {}
             },
             Nav::Down => match page {
@@ -392,6 +364,13 @@ fn browse_page(
                         needs_redraw = true;
                     }
                 }
+                Page::Calendar => {
+                    if let Some(dt) = now {
+                        let dim = days_in_month(dt.year, dt.month);
+                        cal_selected_day = (cal_selected_day + 1).min(dim);
+                        needs_redraw = true;
+                    }
+                }
                 _ => {}
             },
             Nav::Enter => {
@@ -399,7 +378,11 @@ fn browse_page(
                     Page::Home => {}
                     Page::Alarms => activate_alarm_row(board, alarm_store, now, alarm_selected),
                     Page::Todos => activate_todo_row(todo_store, todo_selected),
-                    Page::Calendar => {}
+                    Page::Calendar => {
+                        if let Some(dt) = now {
+                            week_view(board, todo_store, dt.year, dt.month, cal_selected_day, now);
+                        }
+                    }
                 }
                 needs_redraw = true;
             }
@@ -409,25 +392,27 @@ fn browse_page(
     }
 }
 
-/// Per-day cell marker for the month grid: whether an enabled alarm's
-/// schedule covers that day, and (optionally) the importance of a todo due
-/// that day.
+/// Per-day cell marker for the month grid: the importance of a todo due
+/// that day, if any. Alarms don't get a month-grid mark - see the ENTER ->
+/// week view flow below for schedule detail.
 #[derive(Clone, Copy, Default)]
 struct DayMark {
-    alarm: bool,
     todo: Option<Importance>,
 }
 
-/// Read-only current-month grid, today highlighted. No month navigation in
-/// v1 - the device always shows "now". Day cells carry small markers under
-/// the date number: a solid block left of center when an enabled alarm's
-/// schedule covers that day, another (larger for High importance) for a
-/// todo due that day - the calendar is where alarms and todos meet.
+/// Read-only current-month grid. No month navigation in v1 - the device
+/// always shows "now". UP/DOWN moves `selected_day` (a linear cursor over
+/// 1..=days_in_month, wrapping row/col); ENTER on it opens that day's week
+/// view (`week_view`) - the grid itself only has room for a due/not-due
+/// dot, so that's where "what exactly is due Wednesday" gets answered.
+/// `today` gets a thin underline so it stays visible even when the cursor
+/// (the box + accent bar) has moved off it.
 fn draw_month_grid(
     canvas: &mut crate::canvas::Canvas,
     year: u16,
     month: u8,
     today: Option<&DateTime>,
+    selected_day: u8,
     marks: &[DayMark; 32],
 ) {
     let title = format!("{:04} / {:02}", year, month);
@@ -435,24 +420,21 @@ fn draw_month_grid(
 
     const LABELS: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
     const COL_WIDTH: usize = 53;
-    const ROW_HEIGHT: usize = 34;
+    // Rows must fit all 6 possible week rows, each with clearance below
+    // the day number for its todo dot, within the 300px display.
+    const ROW_HEIGHT: usize = 32;
     const ORIGIN_X: usize = 18;
     const ORIGIN_Y: usize = 75;
+    // The todo dot sits below the day number's 16px glyph height, not
+    // overlapping it.
+    const MARKER_Y: usize = 18;
 
-    // Only "today" gets the boxed treatment - that's the one visual
-    // language the whole app uses for "you are here" (nav drawer
-    // selection, list selection, this). Weekend headers used to get the
-    // same stroke_rect box, which diluted that meaning without adding
-    // anything a plain label didn't already say.
     for (i, label) in LABELS.iter().enumerate() {
         let x = ORIGIN_X + i * COL_WIDTH;
         canvas.draw_text_prop(x, ORIGIN_Y, 1, label);
     }
     canvas.fill_rect(16, 99, 368, 1, true);
 
-    // Taller rows spread the (at most 6) week rows down to use the space
-    // down to a real bottom margin instead of leaving a large void below
-    // a short grid.
     let days_in_month = days_in_month(year, month);
     let mut col = weekday_of(year, month, 1) as usize;
     let mut row = 1usize;
@@ -463,24 +445,171 @@ fn draw_month_grid(
         let is_today = today
             .map(|dt| dt.year == year && dt.month == month && dt.day == day)
             .unwrap_or(false);
-        if is_today {
-            canvas.stroke_rect(x.saturating_sub(6), y.saturating_sub(6), 34, 26, 2);
-            canvas.fill_rect(x.saturating_sub(6), y.saturating_sub(6), 4, 26, true);
+        // The cursor gets the same box + left accent bar every selection
+        // in the app uses (nav drawer, list rows) - "you are here, ENTER
+        // acts on it".
+        if day == selected_day {
+            canvas.stroke_rect(x.saturating_sub(6), y.saturating_sub(4), 34, 30, 2);
+            canvas.fill_rect(x.saturating_sub(6), y.saturating_sub(4), 4, 30, true);
         }
         canvas.draw_text_prop(x, y, 1, &text);
-        let mark = marks[day as usize];
-        if mark.alarm {
-            canvas.fill_rect(x, y + 13, 4, 4, true);
+        if is_today {
+            let w = Canvas::text_prop_width(&text, 1);
+            canvas.fill_rect(x, y + 16, w, 1, true);
         }
-        if let Some(importance) = mark.todo {
+        if let Some(importance) = marks[day as usize].todo {
             let size = if importance == Importance::High { 6 } else { 4 };
-            canvas.fill_rect(x + 9, y + 13, size, size, true);
+            canvas.fill_rect(x, y + MARKER_Y, size, size, true);
         }
         col += 1;
         if col > 6 {
             col = 0;
             row += 1;
         }
+    }
+}
+
+const MONTH_NAMES: [&str; 12] = [
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+];
+
+/// Greedy word-wrap: packs whitespace-separated words into lines no wider
+/// than `max_width` px at `scale`, measured with the real proportional
+/// font (not a fixed char count) - a week-view day column is only ~44px
+/// of usable width, too narrow for most todo text on one line. A single
+/// word longer than `max_width` on its own (e.g. "groceries") gets hard
+/// character-split across lines instead of overflowing into the next
+/// column.
+fn wrap_text(text: &str, max_width: usize, scale: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let mut remaining = word;
+        loop {
+            let candidate = if current.is_empty() {
+                remaining.to_string()
+            } else {
+                format!("{current} {remaining}")
+            };
+            if Canvas::text_prop_width(&candidate, scale) <= max_width {
+                current = candidate;
+                break;
+            }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                continue;
+            }
+            let mut split = remaining.len();
+            while split > 1 && Canvas::text_prop_width(&remaining[..split], scale) > max_width {
+                split -= 1;
+            }
+            lines.push(remaining[..split].to_string());
+            remaining = &remaining[split..];
+            if remaining.is_empty() {
+                break;
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Opens a read-only week view for the week (Sun-Sat) containing
+/// `year`/`month`/`day`: one column per day, matching the month grid's own
+/// column rhythm - a week is 7 days side by side, not a 7-row list. Each
+/// column carries its weekday/date and a word-wrapped stack of that day's
+/// open todo text - the detail the month grid's single dot can't show.
+/// `now` gets the same thin underline the month grid uses for today,
+/// independent of which day (`day`, the cursor position when ENTER was
+/// pressed) the view was opened for. Any button closes it - read-only,
+/// there's nothing further to drill into.
+fn week_view(
+    board: &mut Note4Board,
+    todo_store: &TodoStore,
+    year: u16,
+    month: u8,
+    day: u8,
+    now: Option<&DateTime>,
+) {
+    let todos = todo_store.load().unwrap_or_default();
+    let start = alarms::days_since_epoch(year, month, day) - weekday_of(year, month, day) as i64;
+    let (_, sm, sd) = alarms::date_from_days(start);
+    let (_, em, ed) = alarms::date_from_days(start + 6);
+    let title = if sm == em {
+        format!("{} {}-{}", MONTH_NAMES[(sm - 1) as usize], sd, ed)
+    } else {
+        format!(
+            "{} {} - {} {}",
+            MONTH_NAMES[(sm - 1) as usize],
+            sd,
+            MONTH_NAMES[(em - 1) as usize],
+            ed
+        )
+    };
+
+    let canvas = board.display.canvas_mut();
+    canvas.clear();
+    header(canvas, &title);
+
+    const ORIGIN_X: usize = 16;
+    const COL_WIDTH: usize = 53;
+    const WEEKDAY_Y: usize = 38;
+    const DATE_Y: usize = 56;
+    const LIST_TOP: usize = 90;
+    const LINE_H: usize = 15;
+    const BOTTOM: usize = 296;
+
+    for i in 0..7usize {
+        let (y, m, d) = alarms::date_from_days(start + i as i64);
+        let weekday = weekday_of(y, m, d);
+        let x = ORIGIN_X + i * COL_WIDTH;
+        let is_today = now.is_some_and(|dt| dt.year == y && dt.month == m && dt.day == d);
+
+        canvas.draw_text_prop(x, WEEKDAY_Y, 1, WEEKDAY_SHORT[weekday as usize]);
+        let date_text = d.to_string();
+        canvas.draw_text_prop(x, DATE_Y, 1, &date_text);
+        if is_today {
+            let w = Canvas::text_prop_width(&date_text, 1);
+            canvas.fill_rect(x, DATE_Y + 16, w, 1, true);
+        }
+        if i > 0 {
+            canvas.fill_rect(x - 4, WEEKDAY_Y, 1, BOTTOM - WEEKDAY_Y, true);
+        }
+
+        let due: Vec<&str> = todos
+            .iter()
+            .filter(|t| !t.done)
+            .filter(|t| match &t.repeat {
+                Some(r) => r.fires_on(y, m, d, weekday),
+                None => t
+                    .due_date
+                    .is_some_and(|dd| dd.year == y && dd.month == m && dd.day == d),
+            })
+            .map(|t| t.text.as_str())
+            .collect();
+
+        let max_w = COL_WIDTH.saturating_sub(6);
+        let mut y_cursor = LIST_TOP;
+        'day: for text in due {
+            for line in wrap_text(text, max_w, 1) {
+                if y_cursor + LINE_H > BOTTOM {
+                    break 'day;
+                }
+                canvas.draw_text_prop(x, y_cursor, 1, &line);
+                y_cursor += LINE_H;
+            }
+        }
+    }
+
+    let _ = board.display.refresh_full();
+    loop {
+        match poll_nav(board) {
+            Nav::None => {}
+            _ => return,
+        }
+        tick();
     }
 }
 
@@ -505,6 +634,9 @@ fn weekday_of(year: u16, month: u8, day: u8) -> u8 {
     ((y + y / 4 - y / 100 + y / 400 + T[(month - 1) as usize] + day as i64) % 7) as u8
 }
 
+/// `[X]`/`[ ]` + time + compact repeat summary, then the label (when set)
+/// appended and truncated to a single row's width - the alarm page now
+/// shows *when it repeats* and *what it's called*, not just the time.
 fn format_alarm_row(alarm: &StoredAlarm) -> String {
     let mark = if alarm.enabled { "[X]" } else { "[ ]" };
     let when = match &alarm.repeat {
@@ -515,7 +647,7 @@ fn format_alarm_row(alarm: &StoredAlarm) -> String {
                 "{:02}:{:02} {}",
                 alarm.hour,
                 alarm.minute,
-                weekdays.join(" ")
+                weekdays.join(",")
             )
         }
         Repeat::Monthly { days } => {
@@ -534,7 +666,12 @@ fn format_alarm_row(alarm: &StoredAlarm) -> String {
             )
         }
     };
-    format!("{mark} {when}")
+    let mut row = format!("{mark} {when}");
+    if !alarm.label.is_empty() {
+        row.push(' ');
+        row.push_str(&alarm.label);
+    }
+    row.chars().take(34).collect()
 }
 
 const WEEKDAY_SHORT: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
@@ -578,28 +715,57 @@ fn activate_alarm_row(
     }
 }
 
-fn render_todo_page(board: &mut Note4Board, store: &TodoStore, selected: usize) {
+fn render_todo_page(
+    board: &mut Note4Board,
+    store: &TodoStore,
+    selected: usize,
+    now: Option<&DateTime>,
+) {
     let items: Vec<String> = store
         .load()
         .unwrap_or_default()
         .iter()
-        .map(format_todo_row)
+        .map(|t| format_todo_row(t, now))
         .collect();
     let canvas = board.display.canvas_mut();
     draw_rows(canvas, "TODOS", &items, selected);
     footer(canvas, "ENTER DONE   HOLD ENTER IMPORTANCE");
 }
 
+/// Whether `todo` (repeating or one-off) is due on `now`'s date.
+fn todo_due_today(todo: &crate::todos::Todo, now: Option<&DateTime>) -> bool {
+    now.is_some_and(|dt| match &todo.repeat {
+        Some(r) => r.fires_on(dt.year, dt.month, dt.day, dt.weekday),
+        None => todo
+            .due_date
+            .is_some_and(|d| d.year == dt.year && d.month == dt.month && d.day == dt.day),
+    })
+}
+
 /// `[X]`/`[ ]` plus a `!!`/`!` importance suffix (low gets none), then the
-/// text - the same "marker then value" shape the alarm page uses.
-fn format_todo_row(todo: &crate::todos::Todo) -> String {
+/// text; a trailing `- MM/DD`/`- DUE TODAY` marks the due date / repeat so
+/// the open-items page also shows *when* something needs doing, not just
+/// what.
+fn format_todo_row(todo: &crate::todos::Todo, now: Option<&DateTime>) -> String {
     let mark = if todo.done { "[X]" } else { "[ ]" };
     let imp = match todo.importance {
         crate::todos::Importance::Low => "",
         crate::todos::Importance::Medium => "! ",
         crate::todos::Importance::High => "!! ",
     };
-    format!("{mark} {imp}{}", todo.text)
+    let mut row = format!("{mark} {imp}{}", todo.text);
+    if !todo.done {
+        if todo_due_today(todo, now) {
+            row.push_str(" - DUE TODAY");
+        } else if let Some(due) = todo.due_date {
+            row.push_str(&format!(" - {:02}/{:02}", due.month, due.day));
+        } else if let Some(Repeat::Weekly { days }) = &todo.repeat {
+            let weekdays: Vec<&str> = days.iter().map(|d| WEEKDAY_SHORT[*d as usize]).collect();
+            row.push_str(" - ");
+            row.push_str(&weekdays.join(","));
+        }
+    }
+    row.chars().take(34).collect()
 }
 
 fn activate_todo_row(store: &TodoStore, selected: usize) {
@@ -646,17 +812,6 @@ fn add_alarm_screen(board: &mut Note4Board, existing: &[StoredAlarm]) -> Option<
         enabled: true,
         label: String::new(),
     })
-}
-
-/// Pending (not-done) todo count, for the Home screen summary line.
-pub fn pending_todo_count(store: &TodoStore) -> usize {
-    match store.load() {
-        Ok(list) => list.iter().filter(|t| !t.done).count(),
-        Err(err) => {
-            log::warn!("Failed to load todos for pending count: {err}");
-            0
-        }
-    }
 }
 
 /// Sync screen: connects Wi-Fi, fetches alarms and todos from the
@@ -794,15 +949,18 @@ fn ble_pairing_screen(
     log::info!("BLE pairing screen: stopped advertising, reclaimed RAM");
 }
 
-/// Next enabled alarm's time, plus its date if it's a one-shot alarm - for
-/// the Home screen summary card. Kept as two separate fields rather than
-/// one combined "HH:MM MM/DD" string so the card can always draw the time
-/// at a fixed, confident scale and the date (when present) as a smaller
-/// caption underneath, instead of having to shrink the whole value down to
-/// whatever scale fits the longer one-shot format.
+/// Next enabled alarm's summary for the Home screen card: the time plus
+/// enough schedule detail to say *when* without opening the alarm page -
+/// repeat pattern, next firing date, and how many days out it is.
 pub struct NextAlarmLabel {
     pub time: String,
+    /// Next firing date as `MM/DD` (only when the schedule has a specific
+    /// date to name - Weekly/Monthly/Once).
     pub date: Option<String>,
+    /// Repeat summary: `DAILY`, `SU,WE,FR`, `DAY 1,15`, or `ONCE`.
+    pub repeat: String,
+    /// Whole days from today until the next firing (0 = today).
+    pub days_left: i64,
 }
 
 pub fn next_alarm_label(store: &AlarmStore, now: &DateTime) -> Option<NextAlarmLabel> {
@@ -815,14 +973,82 @@ pub fn next_alarm_label(store: &AlarmStore, now: &DateTime) -> Option<NextAlarmL
     };
     alarms::next_due(&list, now).map(|alarm| {
         let time = format!("{:02}:{:02}", alarm.hour, alarm.minute);
-        let date = match &alarm.repeat {
-            Repeat::Daily => None,
-            Repeat::Weekly { .. } | Repeat::Monthly { .. } => {
-                let (_, month, day, _) = alarms::next_occurrence_date(&alarm.repeat, now);
-                Some(format!("{:02}/{:02}", month, day))
+        let (date, repeat, days_left) = match &alarm.repeat {
+            Repeat::Daily => (None, "DAILY".to_string(), 0),
+            Repeat::Weekly { days } => {
+                let (year, month, day, _) = alarms::next_occurrence_date(&alarm.repeat, now);
+                let summary = days
+                    .iter()
+                    .map(|d| WEEKDAY_SHORT[*d as usize])
+                    .collect::<Vec<_>>()
+                    .join(",");
+                (
+                    Some(format!("{:02}/{:02}", month, day)),
+                    summary,
+                    alarms::days_until(year, month, day, now),
+                )
             }
-            Repeat::Once { month, day, .. } => Some(format!("{:02}/{:02}", month, day)),
+            Repeat::Monthly { days } => {
+                let (year, month, day, _) = alarms::next_occurrence_date(&alarm.repeat, now);
+                let summary = days
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                (
+                    Some(format!("{:02}/{:02}", month, day)),
+                    format!("DAY {summary}"),
+                    alarms::days_until(year, month, day, now),
+                )
+            }
+            Repeat::Once { year, month, day } => (
+                Some(format!("{:02}/{:02}", month, day)),
+                "ONCE".to_string(),
+                alarms::days_until(*year, *month, *day, now),
+            ),
         };
-        NextAlarmLabel { time, date }
+        NextAlarmLabel {
+            time,
+            date,
+            repeat,
+            days_left,
+        }
     })
+}
+
+/// Aggregated todo stats for the Home screen's OPEN TODOS card: how many
+/// are still open, how many of those are due today, and how many of those
+/// are high priority.
+pub struct TodoSummary {
+    pub pending: usize,
+    pub due_today: usize,
+    pub high_pending: usize,
+}
+
+pub fn todo_summary(store: &TodoStore, now: Option<&DateTime>) -> TodoSummary {
+    let Ok(list) = store.load() else {
+        return TodoSummary {
+            pending: 0,
+            due_today: 0,
+            high_pending: 0,
+        };
+    };
+    let mut summary = TodoSummary {
+        pending: 0,
+        due_today: 0,
+        high_pending: 0,
+    };
+    for todo in &list {
+        if todo.done {
+            continue;
+        }
+        summary.pending += 1;
+        if todo.importance == Importance::High {
+            summary.high_pending += 1;
+        }
+        if todo_due_today(todo, now) {
+            summary.due_today += 1;
+        }
+    }
+    summary
 }

@@ -454,7 +454,7 @@ fn render_home_now(
     clock: Option<&DateTime>,
 ) {
     let next_alarm = clock.and_then(|dt| screens::next_alarm_label(alarm_store, dt));
-    let todo_pending = screens::pending_todo_count(todo_store);
+    let todo_summary = screens::todo_summary(todo_store, clock);
     let wifi_configured = counters
         .wifi_creds()
         .map(|creds| creds.is_some())
@@ -467,8 +467,12 @@ fn render_home_now(
     board.display.render_home(
         clock,
         next_alarm.as_ref().map(|label| label.time.as_str()),
+        next_alarm.as_ref().map(|label| label.repeat.as_str()),
         next_alarm.as_ref().and_then(|label| label.date.as_deref()),
-        todo_pending,
+        next_alarm.as_ref().map(|label| label.days_left),
+        todo_summary.pending,
+        todo_summary.due_today,
+        todo_summary.high_pending,
         wifi_configured,
         battery_percent,
         charge,

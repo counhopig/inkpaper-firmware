@@ -92,7 +92,7 @@ pub fn show_message(board: &mut Note4Board, title: &str, lines: &[&str], pause: 
 /// Rows visible at once. Longer lists scroll around the selection.
 pub const MAX_LISTED_ITEMS: usize = 7;
 
-const LIST_ROW_HEIGHT: usize = 31;
+const LIST_ROW_HEIGHT: usize = 37;
 /// Fixed left edge for row text, selected or not - previously the selected
 /// row's ">" chevron pushed its text 26px right of every other row's, so
 /// the reading edge jumped as the selection moved. The stroke/accent-bar
@@ -116,7 +116,7 @@ pub fn draw_rows(canvas: &mut Canvas, title: &str, items: &[String], selected: u
             canvas.stroke_rect(16, y, 368, LIST_ROW_HEIGHT - 2, 2);
             canvas.fill_rect(16, y, 5, LIST_ROW_HEIGHT - 2, true);
         }
-        canvas.draw_text_prop(LIST_TEXT_X, y + 6, 1, item);
+        canvas.draw_text_prop(LIST_TEXT_X, y + 10, 1, item);
         y += LIST_ROW_HEIGHT;
     }
 }
@@ -125,17 +125,20 @@ pub fn draw_rows(canvas: &mut Canvas, title: &str, items: &[String], selected: u
 /// caller, e.g. with a "[x] " done marker baked in) under `title` via
 /// [`draw_rows`], and returns the chosen index on ENTER or `None` on
 /// hold-to-cancel. Shared by every screen that's "a list of things, pick
-/// one" - the menu, alarms list, todos list.
+/// one" - the menu, alarms list, todos list. `initial` is the row selected
+/// on first draw (e.g. the day a week view was opened for, or the current
+/// page in the GO TO drawer) - callers that don't care pass 0.
 pub fn pick_from_list(
     board: &mut Note4Board,
     title: &str,
     items: &[String],
     hint: &str,
+    initial: usize,
 ) -> Option<usize> {
     if items.is_empty() {
         return None;
     }
-    let mut selected = 0usize;
+    let mut selected = initial.min(items.len() - 1);
     let mut needs_redraw = true;
     let mut first_draw = true;
     loop {

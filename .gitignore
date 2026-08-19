@@ -1,11 +1,30 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ESP-IDF
 build/
 managed_components/
 dependencies.lock
 sdkconfig
 sdkconfig.old
-backups/*.bin
+
+# Rust build artifacts
 rust-firmware/target/
 rust-firmware/.embuild/
+
+# Device backups and local build output
+backups/*.bin
+tmp/*
+logs/
+
+# Python tooling
 *.pyc
+*.pyo
+*.pyd
 __pycache__/
+
+# Local agent/tooling files
 .omo/
+.claude/

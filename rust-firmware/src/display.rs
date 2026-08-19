@@ -17,6 +17,9 @@ const MONTH_NAMES: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
+/// Weekday abbreviations indexed by the RTC's 0=Sunday..6=Saturday.
+const WEEKDAYS: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
 pub struct EpdDisplay {
     handle: zectrix_epd_handle_t,
     canvas: Canvas,
@@ -44,26 +47,22 @@ impl EpdDisplay {
         &mut self.canvas
     }
 
-    /// The idle/background screen: clock, Wi-Fi/battery status, next-alarm
-    /// summary, pending-todo count. `main.rs` redraws this after returning
-    /// from any modal screen (the navigation drawer, settings menu, alarm
-    /// ring).
-    ///
-    /// `next_alarm_time`/`next_alarm_date` are kept as two separate values
-    /// (rather than one pre-joined "HH:MM MM/DD" string) so the card can
-    /// always draw the time at the same confident scale and the date, only
-    /// present for a one-shot alarm, as a smaller caption underneath -
-    /// joining them into one line forced the whole value down to whatever
-    /// scale fit the longer one-shot format, which made a plain daily
-    /// "07:30" and a dated "22:00 10/25" look like two different kinds of
-    /// number instead of the same field.
+    /// The idle/background screen: clock + weekday, Wi-Fi/battery status,
+    /// next-alarm summary (time, repeat pattern, countdown), and a todos
+    /// summary (open count, due-today count, high-priority count).
+    /// `main.rs` redraws this after returning from any modal screen (the
+    /// navigation drawer, settings menu, alarm ring).
     #[allow(clippy::too_many_arguments)]
     pub fn render_home(
         &mut self,
         clock: Option<&DateTime>,
         next_alarm_time: Option<&str>,
+        next_alarm_repeat: Option<&str>,
         next_alarm_date: Option<&str>,
+        next_alarm_days_left: Option<i64>,
         todo_pending: usize,
+        todo_due_today: usize,
+        todo_high_pending: usize,
         wifi_configured: bool,
         battery_percent: Option<u8>,
         charge: ChargeSnapshot,
@@ -121,11 +120,8 @@ impl EpdDisplay {
         }
 
         // Cards reach down to a real bottom margin (300-269=31px, matching
-        // the header's own rhythm) instead of stopping at a fixed height
-        // that left ~67px of unstructured void below them. The values
-        // that actually matter (next alarm time, pending todo count) are
-        // drawn bigger so they read as confident numbers rather than
-        // floating small inside an oversized box.
+        // the header's own rhythm). Each card now carries three lines:
+        // a big primary value and two smaller schedule/stat captions.
         const CARD_TOP: usize = 139;
         const CARD_H: usize = 130;
         const CARD_W: usize = 176;
@@ -139,19 +135,44 @@ impl EpdDisplay {
             .draw_text_prop(32, CARD_TOP + 14, 1, "NEXT ALARM");
         match next_alarm_time {
             Some(time) => {
-                draw_value_centered(&mut self.canvas, 32, CARD_TOP + 50, VALUE_MAX_WIDTH, time);
-                if let Some(date) = next_alarm_date {
-                    let date_w = Canvas::text_prop_width(date, 1);
+                draw_value_centered(&mut self.canvas, 32, CARD_TOP + 44, VALUE_MAX_WIDTH, time);
+                if let Some(repeat) = next_alarm_repeat {
+                    let w = Canvas::text_prop_width(repeat, 1);
                     self.canvas.draw_text_prop(
-                        32 + (VALUE_MAX_WIDTH.saturating_sub(date_w)) / 2,
-                        CARD_TOP + 104,
+                        32 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
+                        CARD_TOP + 88,
                         1,
-                        date,
+                        repeat,
                     );
                 }
+                let caption = match (next_alarm_date, next_alarm_days_left) {
+                    (None, _) => "EVERY DAY".to_string(),
+                    (Some(_), Some(0)) => "TODAY".to_string(),
+                    (Some(date), Some(n)) if n > 0 => format!("NEXT {date}  D+{n}"),
+                    _ => "EVERY DAY".to_string(),
+                };
+                let w = Canvas::text_prop_width(&caption, 1);
+                self.canvas.draw_text_prop(
+                    32 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
+                    CARD_TOP + 110,
+                    1,
+                    &caption,
+                );
             }
             None => {
-                draw_value_centered(&mut self.canvas, 32, CARD_TOP + 50, VALUE_MAX_WIDTH, "NONE");
+                draw_value_centered(&mut self.canvas, 32, CARD_TOP + 44, VALUE_MAX_WIDTH, "NONE");
+                let caption = "NO ALARMS SET";
+                let w = Canvas::text_prop_width(caption, 1);
+                // Center on the card's full midline (16 + CARD_W/2) rather
+                // than the inner value column, so the long caption visually
+                // matches the big "NONE" rather than hugging the left edge.
+                let card_center_x = 16 + CARD_W / 2;
+                self.canvas.draw_text_prop(
+                    card_center_x - w / 2,
+                    CARD_TOP + 96,
+                    1,
+                    caption,
+                );
             }
         }
 
@@ -165,15 +186,39 @@ impl EpdDisplay {
         draw_value_centered(
             &mut self.canvas,
             right_x + 16,
-            CARD_TOP + 50,
+            CARD_TOP + 44,
             VALUE_MAX_WIDTH,
             &todo_count,
+        );
+        let due_caption = format!("DUE TODAY {}", todo_due_today);
+        let w = Canvas::text_prop_width(&due_caption, 1);
+        self.canvas.draw_text_prop(
+            right_x + 16 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
+            CARD_TOP + 88,
+            1,
+            &due_caption,
+        );
+        let high_caption = format!("HIGH {}", todo_high_pending);
+        let w = Canvas::text_prop_width(&high_caption, 1);
+        self.canvas.draw_text_prop(
+            right_x + 16 + (VALUE_MAX_WIDTH.saturating_sub(w)) / 2,
+            CARD_TOP + 110,
+            1,
+            &high_caption,
         );
     }
 
     fn draw_clock(&mut self, dt: &DateTime) {
         let time = format!("{:02}:{:02}", dt.hour, dt.minute);
         self.canvas.draw_text_prop(24, 44, 4, &time);
+
+        // Weekday under the clock, left-aligned to match it - the date
+        // stays on the right so the two don't compete. Small-caption scale
+        // (matching the cards' value/caption pattern below) so it clears
+        // the clock's 64px-tall glyphs (44..108) instead of overlapping
+        // them the way scale 2 did.
+        let weekday = WEEKDAYS[(dt.weekday as usize).min(6)];
+        self.canvas.draw_text_prop(24, 114, 1, weekday);
 
         let m_idx = (dt.month as usize).saturating_sub(1).min(11);
         let md = format!("{} {}", MONTH_NAMES[m_idx], dt.day);
