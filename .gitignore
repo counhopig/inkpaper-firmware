@@ -13,6 +13,8 @@ sdkconfig.old
 # Rust build artifacts
 rust-firmware/target/
 rust-firmware/.embuild/
+tools/*/target/
+tools/*/*.png
 
 # Device backups and local build output
 backups/*.bin

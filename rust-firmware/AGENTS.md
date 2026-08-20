@@ -11,8 +11,8 @@ The single crate containing all product code: ESP32-S3 firmware with 21 flat src
 | Hardware | `power.rs` | deep sleep/wake-up reasons/GPIO17 RTC hold; `enter_deep_sleep_with_wakeups` is the only safe restart path |
 | Hardware | `rtc.rs` | PCF8563 driver + the single hardware alarm register (L165-170) |
 | Hardware | `button.rs` / `watchdog.rs` / `audio.rs` / `nfc.rs` | debounce + short press/1s long press; task WDT; ES8311; GT23SC6699 |
-| Rendering | `canvas.rs` / `font8x16.rs` / `display.rs` | 1bpp framebuffer + stroke_rect outline; proportional-width glyphs; EPD FFI wrapper + main UI layout |
-| UI | `ui.rs` / `screens.rs` | 3-button generic components (list selection, paging, nav drawer); nav drawer/calendar/alarms/todos/settings menu (entered via long-press UP/DOWN, no on-device text input) |
+| Rendering | `canvas.rs` / `font8x16.rs` / `home.rs` / `display.rs` | 1bpp framebuffer + stroke_rect outline; proportional-width glyphs; **pure home-screen layout (no EPD FFI, PC-previewable via `tools/preview`)**; EPD FFI wrapper + `render_home` delegation |
+| UI | `ui.rs` / `screens.rs` | 3-button generic components (list selection, nav drawer); nav drawer/calendar/alarms/todos/settings menu (entered via long-press UP/DOWN, no on-device text input). `ui::header` carries the home screen's ink-square brand block; `pick_from_list` returns `PickResult::{Selected,Cancelled,OpenNav}` so long-press UP/DOWN opens the GO TO drawer from Settings too. |
 | Services | `alarms.rs` / `todos.rs` / `storage.rs` | NVS store; alarms picks the soonest one to arm PCF8563 |
 | Protocol | `control.rs` / `usb_console.rs` / `ble_control.rs` / `sync.rs` / `wifi.rs` | `>>IP `/`<<IP ` command protocol (USB/BLE share `control::dispatch`); HTTPS sync; WifiManager |
 
@@ -34,17 +34,18 @@ Where the root AGENTS.md red lines are enforced in this crate:
 - **Power-on sequencing**: GPIO42 (AVDD) must be pulled high before the I2C0 init (`board.rs:69-70, 87`); after wake-up, call `release_power_latch_hold()` first, then create the PinDriver on GPIO17 (`power.rs:33-36` → `board.rs:61`).
 - **EPD**: after a 4bpp full refresh, a 1bpp full refresh must be performed once before partial refresh can resume; before a partial refresh, confirm power is managed via the FFI.
 - **Alarm/todo `id`s must not collide within a list** (sync-api contract); commands are only polled in the Home main loop, menu screens do not respond.
-- **Remote-triggered state changes must trigger a home-screen redraw** (`main.rs:294-328`): `CLOCK_RECT` (y=36..128) must not cover the NEXT ALARM / OPEN TODOS panels (y=139..233, `display.rs:48-77`). After `control::dispatch` rewrites NVS, the NVS-render pipeline does not dirty-mark automatically — any USB/BLE command that changes data shown on the home screen (`SyncNow`, `clear_alarms`, and future commands of the same kind) must `dirty.push(FULL_SCREEN_RECT)` in the `main` poll. The command variant is captured with `matches!` before dispatch (`Command` is not `Copy`; dispatch moves it), and the rect is only pushed when the reply is `Reply::Ok`; a failed reply must not waste a full refresh.
+- **Remote-triggered state changes must trigger a home-screen redraw** (`main.rs:294-328`): `CLOCK_RECT` (y=36..128) must not cover the NEXT ALARM / OPEN TODOS panels (y=151..284, `home.rs`'s `CARD_TOP`/`CARD_H`). After `control::dispatch` rewrites NVS, the NVS-render pipeline does not dirty-mark automatically — any USB/BLE command that changes data shown on the home screen (`SyncNow`, `clear_alarms`, and future commands of the same kind) must `dirty.push(FULL_SCREEN_RECT)` in the `main` poll. The command variant is captured with `matches!` before dispatch (`Command` is not `Copy`; dispatch moves it), and the rect is only pushed when the reply is `Reply::Ok`; a failed reply must not waste a full refresh.
 
 ## COMMANDS
 ```bash
 ./scripts/build-rust.sh --release   # run from the repo root; a bare cargo build inside the crate requires an already-sourced ESP-IDF environment
 cargo +esp fmt -- --check           # inside the crate directory
 cargo clippy                        # requires sourcing the ESP-IDF environment first; currently zero warnings (browse_page has #[allow(clippy::too_many_arguments)])
+cd tools/preview && cargo run --release   # PC preview: renders the home screen and sub-screen mockups to PNG without flashing (uses the real home.rs/canvas/font/icons via #[path])
 ```
 
 ## NOTES
 - `IDF_PATH`/`LIBCLANG_PATH` in `.cargo/config.toml` are machine-specific; see the root AGENTS.md NOTES.
 - rust-analyzer availability depends on the repo-root `.vscode/settings.json` + the `esp-ra` toolchain (root cause and rebuild procedure in the root AGENTS.md NOTES); after changing code you can see diagnostics directly in the editor.
 - When changing `sdkconfig.defaults`, cross-check the root red line #2 (DIO) and the partitions.csv 6-level relative-path convention.
-- No tests to run; verification = flash + monitor (root AGENTS.md COMMANDS).
+- No tests to run; verification = flash + monitor (root AGENTS.md COMMANDS). The home-screen layout (and any shared `ui::header`/row chrome) can be iterated in `tools/preview` first, then flashed.
