@@ -586,14 +586,12 @@ const MONTH_NAMES: [&str; 12] = [
     "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
 ];
 
-/// Greedy word-wrap: packs whitespace-separated words into lines no wider
-/// than `max_width` px at `scale`, measured with the real proportional
-/// font (not a fixed char count) - a week-view day column is only ~44px
-/// of usable width, too narrow for most todo text on one line. A single
-/// word longer than `max_width` on its own (e.g. "groceries") gets hard
-/// character-split across lines instead of overflowing into the next
-/// column.
-fn wrap_text(text: &str, max_width: usize, scale: usize) -> Vec<String> {
+/// Greedy word-wrap measured with the tiny 5x7 font
+/// (`Canvas::text_small_width`) - the week-view columns are too
+/// narrow to waste 16px-tall type on. A single word longer than
+/// `max_width` on its own gets hard character-split across lines
+/// instead of overflowing into the next column.
+fn wrap_text_small(text: &str, max_width: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut current = String::new();
     for word in text.split_whitespace() {
@@ -604,7 +602,7 @@ fn wrap_text(text: &str, max_width: usize, scale: usize) -> Vec<String> {
             } else {
                 format!("{current} {remaining}")
             };
-            if Canvas::text_prop_width(&candidate, scale) <= max_width {
+            if Canvas::text_small_width(&candidate) <= max_width {
                 current = candidate;
                 break;
             }
@@ -613,7 +611,7 @@ fn wrap_text(text: &str, max_width: usize, scale: usize) -> Vec<String> {
                 continue;
             }
             let mut split = remaining.len();
-            while split > 1 && Canvas::text_prop_width(&remaining[..split], scale) > max_width {
+            while split > 1 && Canvas::text_small_width(&remaining[..split]) > max_width {
                 split -= 1;
             }
             lines.push(remaining[..split].to_string());
@@ -666,30 +664,42 @@ fn week_view(
     canvas.clear();
     header(canvas, &title);
 
+    // Seven compact day cards keep the dense week scannable without the
+    // spreadsheet-like full-height grid. The opened day gets the same
+    // outline/accent treatment as selected rows elsewhere in the UI; today
+    // remains a separate, small marker in the card's top-right corner.
     const ORIGIN_X: usize = 16;
-    const COL_WIDTH: usize = 53;
-    const WEEKDAY_Y: usize = 38;
+    const COL_WIDTH: usize = 50;
+    const COL_GAP: usize = 3;
+    const CARD_TOP: usize = 38;
+    const CARD_HEIGHT: usize = 40;
+    const WEEKDAY_Y: usize = 43;
     const DATE_Y: usize = 56;
-    const LIST_TOP: usize = 90;
-    const LINE_H: usize = 15;
+    const LIST_TOP: usize = 88;
+    const LINE_H: usize = 8;
+    const ITEM_GAP: usize = 5;
     const BOTTOM: usize = 296;
+    let opened_index = (alarms::days_since_epoch(year, month, day) - start) as usize;
 
     for i in 0..7usize {
         let (y, m, d) = alarms::date_from_days(start + i as i64);
         let weekday = weekday_of(y, m, d);
-        let x = ORIGIN_X + i * COL_WIDTH;
+        let x = ORIGIN_X + i * (COL_WIDTH + COL_GAP);
         let is_today = now.is_some_and(|dt| dt.year == y && dt.month == m && dt.day == d);
 
-        canvas.draw_text_prop(x, WEEKDAY_Y, 1, WEEKDAY_SHORT[weekday as usize]);
-        let date_text = d.to_string();
-        canvas.draw_text_prop(x, DATE_Y, 1, &date_text);
+        if i == opened_index {
+            canvas.stroke_rect(x, CARD_TOP, COL_WIDTH, CARD_HEIGHT, 2);
+            canvas.fill_rect(x, CARD_TOP + CARD_HEIGHT - 4, COL_WIDTH, 4, true);
+        }
         if is_today {
-            let w = Canvas::text_prop_width(&date_text, 1);
-            canvas.fill_rect(x, DATE_Y + 16, w, 1, true);
+            canvas.fill_rect(x + COL_WIDTH - 7, CARD_TOP + 4, 3, 3, true);
         }
-        if i > 0 {
-            canvas.fill_rect(x - 4, WEEKDAY_Y, 1, BOTTOM - WEEKDAY_Y, true);
-        }
+        let weekday_text = WEEKDAY_SHORT[weekday as usize];
+        let weekday_w = Canvas::text_small_width(weekday_text);
+        canvas.draw_text_small(x + (COL_WIDTH - weekday_w) / 2, WEEKDAY_Y, weekday_text);
+        let date_text = d.to_string();
+        let date_w = Canvas::text_prop_width(&date_text, 1);
+        canvas.draw_text_prop(x + (COL_WIDTH - date_w) / 2, DATE_Y, 1, &date_text);
 
         let due: Vec<&str> = todos
             .iter()
@@ -703,15 +713,42 @@ fn week_view(
             .map(|t| t.text.as_str())
             .collect();
 
-        let max_w = COL_WIDTH.saturating_sub(6);
+        // A square bullet creates a stable reading edge. Short inset rules
+        // separate items while leaving white gutters between day columns.
+        const MAX_TODO_LINES: usize = 3;
+        const TEXT_INSET: usize = 8;
+        let text_w = COL_WIDTH.saturating_sub(TEXT_INSET + 2);
         let mut y_cursor = LIST_TOP;
         'day: for text in due {
-            for line in wrap_text(text, max_w, 1) {
-                if y_cursor + LINE_H > BOTTOM {
+            let mut lines = wrap_text_small(text, text_w);
+            let truncated = lines.len() > MAX_TODO_LINES;
+            lines.truncate(MAX_TODO_LINES);
+            canvas.fill_rect(x + 1, y_cursor + 2, 3, 3, true);
+            for (line_index, line) in lines.iter().enumerate() {
+                if y_cursor + 7 > BOTTOM {
                     break 'day;
                 }
-                canvas.draw_text_prop(x, y_cursor, 1, &line);
+                let text_x = x + TEXT_INSET;
+                if truncated && line_index + 1 == lines.len() {
+                    let ellipsis_w = Canvas::text_small_width("...");
+                    let mut end = line.len();
+                    while end > 0 && Canvas::text_small_width(&line[..end]) + ellipsis_w > text_w {
+                        end -= 1;
+                    }
+                    canvas.draw_text_small(text_x, y_cursor, &line[..end]);
+                    canvas.draw_text_small(
+                        text_x + Canvas::text_small_width(&line[..end]),
+                        y_cursor,
+                        "...",
+                    );
+                } else {
+                    canvas.draw_text_small(text_x, y_cursor, line);
+                }
                 y_cursor += LINE_H;
+            }
+            y_cursor += ITEM_GAP;
+            if y_cursor <= BOTTOM {
+                canvas.fill_rect(x + TEXT_INSET, y_cursor - 2, text_w, 1, true);
             }
         }
     }

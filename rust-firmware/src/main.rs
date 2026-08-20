@@ -6,6 +6,7 @@ mod button;
 mod canvas;
 mod control;
 mod display;
+mod font5x7;
 mod font8x16;
 mod home;
 mod icons;

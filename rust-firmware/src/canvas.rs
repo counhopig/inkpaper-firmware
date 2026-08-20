@@ -104,6 +104,32 @@ impl Canvas {
         self.draw_text_prop_ink(x, y, scale, text, true)
     }
 
+    /// Draws text with the tiny 5x7 font (`font5x7.rs`) at scale 1. Used for
+    /// dense columnar layouts (week view) where 16px type is too tall.
+    pub fn draw_text_small(&mut self, x: usize, y: usize, text: &str) -> usize {
+        let mut cursor = x;
+        for character in text.chars() {
+            let (rows, width) = crate::font5x7::glyph5x7(character);
+            for (row, bits) in rows.iter().enumerate() {
+                for column in 0..width as usize {
+                    if bits & (1 << (4 - column)) != 0 {
+                        self.set_pixel(cursor + column, y + row, true);
+                    }
+                }
+            }
+            cursor += width as usize + 1;
+        }
+        cursor - x
+    }
+
+    /// Pixel width `text` would occupy if drawn with
+    /// [`Canvas::draw_text_small`], without drawing anything.
+    pub fn text_small_width(text: &str) -> usize {
+        text.chars()
+            .map(|c| (crate::font5x7::glyph5x7(c).1 as usize) + 1)
+            .sum()
+    }
+
     /// Pixel width `text` would occupy if drawn with [`Canvas::draw_text_prop`]
     /// at `scale`, without drawing anything - for right-aligning/centering
     /// before the content is known to fit.
