@@ -12,6 +12,9 @@ mod canvas;
 #[path = "../../../rust-firmware/src/font8x16.rs"]
 mod font8x16;
 
+#[path = "../../../rust-firmware/src/font5x7.rs"]
+mod font5x7;
+
 #[path = "../../../rust-firmware/src/icons.rs"]
 mod icons;
 
@@ -244,10 +247,9 @@ fn main() {
     save("calendar.png", &c);
 
     // Week view (README's week-view.png, mirrors screens::week_view):
-    // one column per day, todo text word-wrapped to the column width via
-    // the same wrap_text logic the firmware uses (a long todo must stay
-    // inside its day column, never bleed into the neighbour).
-    fn wrap_text(text: &str, max_width: usize, scale: usize) -> Vec<String> {
+    // compact day cards, an outlined/accented opened day, and bullet-led
+    // todo stacks separated by short inset rules.
+    fn wrap_text_small(text: &str, max_width: usize) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         let mut current = String::new();
         for word in text.split_whitespace() {
@@ -258,7 +260,7 @@ fn main() {
                 } else {
                     format!("{current} {remaining}")
                 };
-                if canvas::Canvas::text_prop_width(&candidate, scale) <= max_width {
+                if canvas::Canvas::text_small_width(&candidate) <= max_width {
                     current = candidate;
                     break;
                 }
@@ -267,8 +269,7 @@ fn main() {
                     continue;
                 }
                 let mut split = remaining.len();
-                while split > 1
-                    && canvas::Canvas::text_prop_width(&remaining[..split], scale) > max_width
+                while split > 1 && canvas::Canvas::text_small_width(&remaining[..split]) > max_width
                 {
                     split -= 1;
                 }
@@ -286,15 +287,19 @@ fn main() {
     }
     let mut c = Canvas::new();
     c.clear();
-    header(&mut c, "AUG 20-26");
-    const WV_COL: usize = 53;
-    const WV_WD: usize = 38;
+    header(&mut c, "AUG 16-22");
+    const WV_COL: usize = 50;
+    const WV_GAP: usize = 3;
+    const WV_CARD_TOP: usize = 38;
+    const WV_CARD_H: usize = 40;
+    const WV_WD: usize = 43;
     const WV_DATE: usize = 56;
-    const WV_LIST: usize = 90;
-    const WV_LINE: usize = 16;
+    const WV_LIST: usize = 88;
+    const WV_LINE: usize = 8;
+    const WV_ITEM_GAP: usize = 5;
     const WV_BOTTOM: usize = 296;
     let wdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
-    let dates = [20, 21, 22, 23, 24, 25, 26];
+    let dates = [16, 17, 18, 19, 20, 21, 22];
     // A deliberately long todo on WED proves word-wrap keeps it inside the
     // column; the rest stay short so the overflow is easy to spot if it
     // ever regresses.
@@ -303,30 +308,58 @@ fn main() {
         vec!["call mum".into()],
         vec![],
         vec!["remember to water the plants before the weekend trip".into()],
-        vec!["buy oats".into(), "pay the rent on time".into()],
+        vec!["buy oats".into(), "pay rent on time".into()],
         vec![],
         vec!["weekend".into(), "cleanup".into()],
     ];
-    let max_w = WV_COL.saturating_sub(6);
+    const MAX_TODO_LINES: usize = 3;
+    const TEXT_INSET: usize = 8;
+    let text_w = WV_COL.saturating_sub(TEXT_INSET + 2);
     for i in 0..7usize {
-        let x = 16 + i * WV_COL;
-        c.draw_text_prop(x, WV_WD, 1, wdays[i]);
-        c.draw_text_prop(x, WV_DATE, 1, &dates[i].to_string());
-        if i == 3 {
-            let w = canvas::Canvas::text_prop_width(&dates[i].to_string(), 1);
-            c.fill_rect(x, WV_DATE + 16, w, 1, true);
+        let x = 16 + i * (WV_COL + WV_GAP);
+        if i == 4 {
+            c.stroke_rect(x, WV_CARD_TOP, WV_COL, WV_CARD_H, 2);
+            c.fill_rect(x, WV_CARD_TOP + WV_CARD_H - 4, WV_COL, 4, true);
+            c.fill_rect(x + WV_COL - 7, WV_CARD_TOP + 4, 3, 3, true);
         }
-        if i > 0 {
-            c.fill_rect(x - 4, WV_WD, 1, WV_BOTTOM - WV_WD, true);
-        }
+        let weekday_w = canvas::Canvas::text_small_width(wdays[i]);
+        c.draw_text_small(x + (WV_COL - weekday_w) / 2, WV_WD, wdays[i]);
+        let date = dates[i].to_string();
+        let date_w = canvas::Canvas::text_prop_width(&date, 1);
+        c.draw_text_prop(x + (WV_COL - date_w) / 2, WV_DATE, 1, &date);
         let mut yy = WV_LIST;
-        for text in &todos[i] {
-            for line in wrap_text(text, max_w, 1) {
-                if yy + WV_LINE > WV_BOTTOM {
-                    break;
+        'day: for text in &todos[i] {
+            let mut lines = wrap_text_small(text, text_w);
+            let truncated = lines.len() > MAX_TODO_LINES;
+            lines.truncate(MAX_TODO_LINES);
+            c.fill_rect(x + 1, yy + 2, 3, 3, true);
+            for (line_index, line) in lines.iter().enumerate() {
+                if yy + 7 > WV_BOTTOM {
+                    break 'day;
                 }
-                c.draw_text_prop(x, yy, 1, &line);
+                let text_x = x + TEXT_INSET;
+                if truncated && line_index + 1 == lines.len() {
+                    let ellipsis_w = canvas::Canvas::text_small_width("...");
+                    let mut end = line.len();
+                    while end > 0
+                        && canvas::Canvas::text_small_width(&line[..end]) + ellipsis_w > text_w
+                    {
+                        end -= 1;
+                    }
+                    c.draw_text_small(text_x, yy, &line[..end]);
+                    c.draw_text_small(
+                        text_x + canvas::Canvas::text_small_width(&line[..end]),
+                        yy,
+                        "...",
+                    );
+                } else {
+                    c.draw_text_small(text_x, yy, line);
+                }
                 yy += WV_LINE;
+            }
+            yy += WV_ITEM_GAP;
+            if yy <= WV_BOTTOM {
+                c.fill_rect(x + TEXT_INSET, yy - 2, text_w, 1, true);
             }
         }
     }
