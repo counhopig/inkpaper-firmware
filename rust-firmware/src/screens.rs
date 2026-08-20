@@ -12,6 +12,7 @@ use crate::sync;
 use crate::todos::{Importance, TodoStore};
 use crate::ui::{
     draw_rows, footer, header, pick_from_list, pick_number, poll_nav, show_message, tick, Nav,
+    PickResult,
 };
 use crate::wifi::WifiManager;
 
@@ -36,28 +37,31 @@ pub fn open_menu(
         "SLEEP".to_string(),
     ];
     loop {
-        let Some(index) = pick_from_list(
+        let want_nav = match pick_from_list(
             board,
             "SETTINGS",
             &items,
             "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
             0,
-        ) else {
-            return;
-        };
-        match index {
-            0 => sync_now_screen(board, counters, wifi_mgr, alarm_store, todo_store, now),
-            1 => sync_interval_screen(board, counters),
-            2 => ble_pairing_screen(
-                board,
-                counters,
-                wifi_mgr,
-                alarm_store,
-                todo_store,
-                now,
-                ble_control,
-            ),
-            3 => {
+        ) {
+            PickResult::Selected(0) => {
+                sync_now_screen(board, counters, wifi_mgr, alarm_store, todo_store, now);
+                false
+            }
+            PickResult::Selected(1) => sync_interval_screen(board, counters),
+            PickResult::Selected(2) => {
+                ble_pairing_screen(
+                    board,
+                    counters,
+                    wifi_mgr,
+                    alarm_store,
+                    todo_store,
+                    now,
+                    ble_control,
+                );
+                false
+            }
+            PickResult::Selected(3) => {
                 show_message(
                     board,
                     "SLEEP",
@@ -66,15 +70,33 @@ pub fn open_menu(
                 );
                 crate::power::enter_deep_sleep_with_wakeups(None);
             }
-            _ => {}
+            PickResult::Cancelled => return,
+            PickResult::OpenNav => true,
+            _ => false,
+        };
+        // Long UP/DOWN inside Settings opens the GO TO drawer, matching
+        // every other page (from here you can reach Todos/Calendar/etc.).
+        if want_nav {
+            open_navigation(
+                board,
+                counters,
+                wifi_mgr,
+                alarm_store,
+                todo_store,
+                now,
+                ble_control,
+            );
+            return;
         }
     }
 }
 
 /// Pick the automatic sync interval from preset options (1/5/10/30/60
 /// minutes). The device re-syncs with the configured server every this many
-/// minutes while idle on Home (see `main.rs`'s `maybe_auto_sync`).
-fn sync_interval_screen(board: &mut Note4Board, counters: &PersistedCounters) {
+/// minutes while idle on Home (see `main.rs`'s `maybe_auto_sync`). Returns
+/// `true` when the user long-pressed UP/DOWN, so the caller can open the
+/// navigation drawer (this screen lacks the full context to do so itself).
+fn sync_interval_screen(board: &mut Note4Board, counters: &PersistedCounters) -> bool {
     const OPTIONS: [(&str, u16); 5] = [
         ("1 MIN", 1),
         ("5 MIN", 5),
@@ -83,14 +105,17 @@ fn sync_interval_screen(board: &mut Note4Board, counters: &PersistedCounters) {
         ("60 MIN", 60),
     ];
     let items: Vec<String> = OPTIONS.iter().map(|(label, _)| label.to_string()).collect();
-    let Some(index) = pick_from_list(
+    let outcome = pick_from_list(
         board,
         "SYNC INTERVAL",
         &items,
         "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
         0,
-    ) else {
-        return;
+    );
+    let PickResult::Selected(index) = outcome else {
+        // Cancelled (hold ENTER) or OpenNav (long UP/DOWN) - surface the
+        // nav request upward so Settings can open the GO TO drawer.
+        return matches!(outcome, PickResult::OpenNav);
     };
     let (_, minutes) = OPTIONS[index];
     match counters.set_sync_interval_minutes(minutes) {
@@ -105,6 +130,7 @@ fn sync_interval_screen(board: &mut Note4Board, counters: &PersistedCounters) {
         }
         Err(err) => log::warn!("Failed to save sync interval: {err}"),
     }
+    false
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -126,7 +152,7 @@ const NAV_BAR_RECT: Rect = Rect {
     x: 16,
     y: 34,
     width: 176,
-    height: 250,
+    height: 266,
 };
 const NAV_BAR_ROW_H: usize = 37;
 /// Destinations in row order; `selected` indexes straight into this, and
@@ -169,6 +195,18 @@ fn draw_navigation_bar(canvas: &mut Canvas, selected: usize) {
         canvas.draw_text_prop(30, y + 10, 1, label);
         y += NAV_BAR_ROW_H;
     }
+    // A thick vertical rule down the bar's right edge separates the drawer
+    // from the underlying page content it overlays - the same 3px weight
+    // the accent bars use, so the drawer reads as a deliberate panel edge
+    // rather than a floating list.
+    let rule_x = NAV_BAR_RECT.x as usize + NAV_BAR_RECT.width as usize - 3;
+    canvas.fill_rect(
+        rule_x,
+        NAV_BAR_RECT.y as usize,
+        3,
+        NAV_BAR_RECT.height as usize,
+        true,
+    );
 }
 
 /// Opens the GO TO left-hand bar, pre-selected on wherever you already are

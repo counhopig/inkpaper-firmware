@@ -7,6 +7,7 @@ mod canvas;
 mod control;
 mod display;
 mod font8x16;
+mod home;
 mod icons;
 mod nfc;
 mod power;

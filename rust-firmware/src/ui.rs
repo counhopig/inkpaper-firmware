@@ -56,7 +56,10 @@ pub fn tick() {
 }
 
 pub fn header(canvas: &mut Canvas, title: &str) {
-    canvas.draw_text_prop(16, 8, 1, "INKPAPER");
+    // Same brand block as the home screen: ink square mark + wordmark.
+    canvas.stroke_rect(16, 9, 14, 14, 2);
+    canvas.fill_rect(21, 14, 4, 4, true);
+    canvas.draw_text_prop(38, 8, 1, "INKPAPER");
     let width = Canvas::text_prop_width(title, 1);
     canvas.draw_text_prop(384usize.saturating_sub(width), 8, 1, title);
     canvas.fill_rect(16, 29, 368, 1, true);
@@ -121,6 +124,20 @@ pub fn draw_rows(canvas: &mut Canvas, title: &str, items: &[String], selected: u
     }
 }
 
+/// Outcome of [`pick_from_list`] - not just which row was chosen, because
+/// Settings needs to distinguish "picked a row", "cancelled" and "long
+/// UP/DOWN pressed" (which every other page treats as "open the GO TO
+/// drawer"). Making the long-press an explicit outcome lets the Settings
+/// screens behave like the rest of the app instead of silently swallowing
+/// it as a page scroll.
+pub enum PickResult {
+    Selected(usize),
+    /// Hold ENTER: back out of the list.
+    Cancelled,
+    /// Long UP/DOWN: the caller should open the navigation drawer.
+    OpenNav,
+}
+
 /// Blocking wheel-list picker: draws `items` (already formatted by the
 /// caller, e.g. with a "[x] " done marker baked in) under `title` via
 /// [`draw_rows`], and returns the chosen index on ENTER or `None` on
@@ -134,9 +151,9 @@ pub fn pick_from_list(
     items: &[String],
     hint: &str,
     initial: usize,
-) -> Option<usize> {
+) -> PickResult {
     if items.is_empty() {
-        return None;
+        return PickResult::Cancelled;
     }
     let mut selected = initial.min(items.len() - 1);
     let mut needs_redraw = true;
@@ -172,16 +189,9 @@ pub fn pick_from_list(
                 selected = (selected + 1) % items.len();
                 needs_redraw = true;
             }
-            Nav::Enter => return Some(selected),
-            Nav::Cancel => return None,
-            Nav::PageUp => {
-                selected = selected.saturating_sub(MAX_LISTED_ITEMS);
-                needs_redraw = true;
-            }
-            Nav::PageDown => {
-                selected = (selected + MAX_LISTED_ITEMS).min(items.len() - 1);
-                needs_redraw = true;
-            }
+            Nav::Enter => return PickResult::Selected(selected),
+            Nav::Cancel => return PickResult::Cancelled,
+            Nav::PageUp | Nav::PageDown => return PickResult::OpenNav,
             Nav::None => {}
         }
         tick();
