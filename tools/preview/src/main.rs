@@ -244,7 +244,46 @@ fn main() {
     save("calendar.png", &c);
 
     // Week view (README's week-view.png, mirrors screens::week_view):
-    // one column per day, word-wrapped todo text under each date.
+    // one column per day, todo text word-wrapped to the column width via
+    // the same wrap_text logic the firmware uses (a long todo must stay
+    // inside its day column, never bleed into the neighbour).
+    fn wrap_text(text: &str, max_width: usize, scale: usize) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for word in text.split_whitespace() {
+            let mut remaining = word;
+            loop {
+                let candidate = if current.is_empty() {
+                    remaining.to_string()
+                } else {
+                    format!("{current} {remaining}")
+                };
+                if canvas::Canvas::text_prop_width(&candidate, scale) <= max_width {
+                    current = candidate;
+                    break;
+                }
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    continue;
+                }
+                let mut split = remaining.len();
+                while split > 1
+                    && canvas::Canvas::text_prop_width(&remaining[..split], scale) > max_width
+                {
+                    split -= 1;
+                }
+                lines.push(remaining[..split].to_string());
+                remaining = &remaining[split..];
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
     let mut c = Canvas::new();
     c.clear();
     header(&mut c, "AUG 20-26");
@@ -252,19 +291,23 @@ fn main() {
     const WV_WD: usize = 38;
     const WV_DATE: usize = 56;
     const WV_LIST: usize = 90;
-    const WV_LINE: usize = 15;
+    const WV_LINE: usize = 16;
     const WV_BOTTOM: usize = 296;
     let wdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
     let dates = [20, 21, 22, 23, 24, 25, 26];
-    let cols: [&[&str]; 7] = [
-        &[],
-        &["call mum"],
-        &[],
-        &["water", "plants"],
-        &["buy oats", "pay rent"],
-        &[],
-        &["weekend", "cleanup"],
+    // A deliberately long todo on WED proves word-wrap keeps it inside the
+    // column; the rest stay short so the overflow is easy to spot if it
+    // ever regresses.
+    let todos: [Vec<String>; 7] = [
+        vec![],
+        vec!["call mum".into()],
+        vec![],
+        vec!["remember to water the plants before the weekend trip".into()],
+        vec!["buy oats".into(), "pay the rent on time".into()],
+        vec![],
+        vec!["weekend".into(), "cleanup".into()],
     ];
+    let max_w = WV_COL.saturating_sub(6);
     for i in 0..7usize {
         let x = 16 + i * WV_COL;
         c.draw_text_prop(x, WV_WD, 1, wdays[i]);
@@ -277,12 +320,14 @@ fn main() {
             c.fill_rect(x - 4, WV_WD, 1, WV_BOTTOM - WV_WD, true);
         }
         let mut yy = WV_LIST;
-        for line in cols[i] {
-            if yy + WV_LINE > WV_BOTTOM {
-                break;
+        for text in &todos[i] {
+            for line in wrap_text(text, max_w, 1) {
+                if yy + WV_LINE > WV_BOTTOM {
+                    break;
+                }
+                c.draw_text_prop(x, yy, 1, &line);
+                yy += WV_LINE;
             }
-            c.draw_text_prop(x, yy, 1, line);
-            yy += WV_LINE;
         }
     }
     save("week-view.png", &c);
