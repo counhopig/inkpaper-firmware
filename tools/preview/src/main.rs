@@ -77,7 +77,7 @@ fn full_battery() -> board::ChargeSnapshot {
 }
 
 fn main() {
-    // Scene 1: everything populated, good battery, wifi.
+    // Scene 1: home screen, everything populated (README's home.png).
     let mut c = Canvas::new();
     home::render(
         &mut c,
@@ -91,7 +91,7 @@ fn main() {
         Some(85),
         full_battery(),
     );
-    save("home-full.png", &c);
+    save("home.png", &c);
 
     // Scene 2: no clock (RTC lost), no alarm, no wifi, low battery.
     let mut c = Canvas::new();
@@ -204,6 +204,126 @@ fn main() {
         }
         c.draw_text_prop(30, y + 10, 1, d);
     }
-    c.fill_rect(16 + 176 - 3, 34, 3, 250, true);
-    save("page-goto.png", &c);
+    c.fill_rect(16 + 176 - 3, 34, 3, 266, true);
+    save("goto.png", &c);
+
+    // Calendar month grid (README's calendar.png, mirrors
+    // screens::draw_month_grid). August 2026 starts on a Saturday.
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "CALENDAR");
+    c.draw_text_prop(16, 38, 2, "2026 / 08");
+    const CAL_LABELS: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
+    const CAL_COL: usize = 53;
+    const CAL_ORIGIN_X: usize = 18;
+    const CAL_ORIGIN_Y: usize = 75;
+    const CAL_ROW: usize = 32;
+    for (i, l) in CAL_LABELS.iter().enumerate() {
+        c.draw_text_prop(CAL_ORIGIN_X + i * CAL_COL, CAL_ORIGIN_Y, 1, l);
+    }
+    c.fill_rect(16, 99, 368, 1, true);
+    let mut col = 6usize; // 2026-08-01 = Saturday
+    let mut row = 1usize;
+    for day in 1..=31 {
+        let x = CAL_ORIGIN_X + col * CAL_COL;
+        let y = CAL_ORIGIN_Y + row * CAL_ROW;
+        if day == 20 {
+            c.stroke_rect(x.saturating_sub(6), y.saturating_sub(4), 34, 30, 2);
+            c.fill_rect(x.saturating_sub(6), y.saturating_sub(4), 4, 30, true);
+            let w = canvas::Canvas::text_prop_width(&day.to_string(), 1);
+            c.fill_rect(x, y + 16, w, 1, true);
+            c.fill_rect(x, y + 18, 4, 4, true);
+        }
+        c.draw_text_prop(x, y, 1, &day.to_string());
+        col += 1;
+        if col > 6 {
+            col = 0;
+            row += 1;
+        }
+    }
+    save("calendar.png", &c);
+
+    // Week view (README's week-view.png, mirrors screens::week_view):
+    // one column per day, word-wrapped todo text under each date.
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "AUG 20-26");
+    const WV_COL: usize = 53;
+    const WV_WD: usize = 38;
+    const WV_DATE: usize = 56;
+    const WV_LIST: usize = 90;
+    const WV_LINE: usize = 15;
+    const WV_BOTTOM: usize = 296;
+    let wdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+    let dates = [20, 21, 22, 23, 24, 25, 26];
+    let cols: [&[&str]; 7] = [
+        &[],
+        &["call mum"],
+        &[],
+        &["water", "plants"],
+        &["buy oats", "pay rent"],
+        &[],
+        &["weekend", "cleanup"],
+    ];
+    for i in 0..7usize {
+        let x = 16 + i * WV_COL;
+        c.draw_text_prop(x, WV_WD, 1, wdays[i]);
+        c.draw_text_prop(x, WV_DATE, 1, &dates[i].to_string());
+        if i == 3 {
+            let w = canvas::Canvas::text_prop_width(&dates[i].to_string(), 1);
+            c.fill_rect(x, WV_DATE + 16, w, 1, true);
+        }
+        if i > 0 {
+            c.fill_rect(x - 4, WV_WD, 1, WV_BOTTOM - WV_WD, true);
+        }
+        let mut yy = WV_LIST;
+        for line in cols[i] {
+            if yy + WV_LINE > WV_BOTTOM {
+                break;
+            }
+            c.draw_text_prop(x, yy, 1, line);
+            yy += WV_LINE;
+        }
+    }
+    save("week-view.png", &c);
+
+    // Alarms list (README's alarms.png, mirrors screens::render_alarm_page).
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "ALARMS");
+    let alarm_rows = [
+        "[X] 07:30 DAILY  Wake up",
+        "[ ] 21:15 SU,MO,WE  Water plants",
+        "[X] 06:00 DAY 1,15  Pay bills",
+        "+ ADD ALARM",
+    ];
+    for (i, r) in alarm_rows.iter().enumerate() {
+        let y = 39 + i * 37;
+        if i == 0 {
+            c.stroke_rect(16, y, 368, 35, 2);
+            c.fill_rect(16, y, 5, 35, true);
+        }
+        c.draw_text_prop(50, y + 10, 1, r);
+    }
+    save("alarms.png", &c);
+
+    // Todos list (README's todos.png, mirrors screens::render_todo_page).
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "TODOS");
+    let todo_rows = [
+        "[ ] !! Buy oats - DUE TODAY",
+        "[X] Water the plant",
+        "[ ] ! Call mum - 08/24",
+        "[ ] Review notes",
+    ];
+    for (i, r) in todo_rows.iter().enumerate() {
+        let y = 39 + i * 37;
+        if i == 2 {
+            c.stroke_rect(16, y, 368, 35, 2);
+            c.fill_rect(16, y, 5, 35, true);
+        }
+        c.draw_text_prop(50, y + 10, 1, r);
+    }
+    save("todos.png", &c);
 }
