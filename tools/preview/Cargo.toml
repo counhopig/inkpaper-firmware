@@ -1,0 +1,13 @@
+[package]
+name = "inkpaper-preview"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+image = "0.25"
+
+# Refer the firmware's render modules in place (they are pure Rust, no EPD
+# FFI), so the preview always draws exactly what the device would.
+[profile.release]
+opt-level = 0
