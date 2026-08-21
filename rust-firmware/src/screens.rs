@@ -925,6 +925,9 @@ fn activate_alarm_row(
         }
     } else {
         list[selected].enabled = !list[selected].enabled;
+        if let Err(err) = store.mark_dirty(list[selected].id) {
+            log::warn!("Failed to mark alarm dirty: {err}");
+        }
     }
     if let Err(err) = store.save(&list) {
         log::warn!("Failed to save alarms: {err}");
@@ -995,6 +998,9 @@ fn activate_todo_row(store: &TodoStore, selected: usize) {
         return;
     };
     todo.done = !todo.done;
+    if let Err(err) = store.mark_dirty(todo.id) {
+        log::warn!("Failed to mark todo dirty: {err}");
+    }
     if let Err(err) = store.save(&list) {
         log::warn!("Failed to save todos: {err}");
     }
@@ -1014,6 +1020,9 @@ fn cycle_todo_importance(store: &TodoStore, selected: usize) {
         crate::todos::Importance::High => crate::todos::Importance::Low,
     };
     log::info!("Todo id={} importance now {:?}", todo.id, todo.importance);
+    if let Err(err) = store.mark_dirty(todo.id) {
+        log::warn!("Failed to mark todo dirty: {err}");
+    }
     if let Err(err) = store.save(&list) {
         log::warn!("Failed to save todos: {err}");
     }

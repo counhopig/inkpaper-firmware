@@ -568,6 +568,10 @@ fn maybe_auto_sync(
 }
 
 /// Runs a full `sync::sync_now` and refreshes the home screen on success.
+/// (The once-per-day NTP RTC alignment lives inside `sync::sync_now`,
+/// where Wi-Fi is still connected; `maybe_align_rtc` there keeps the
+/// PCF8563's drift from pulling the cron sync boundaries off the real
+/// wall clock.)
 fn run_full_sync(ctx: &mut DeviceContext, now: &DateTime) {
     match sync::sync_now(
         ctx.counters,

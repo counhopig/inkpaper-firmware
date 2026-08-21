@@ -118,9 +118,20 @@ pub fn fetch_and_apply(
     let pending_read = inbox_store
         .pending_read()
         .map_err(|e| anyhow!("failed to load pending inbox reads for upload: {e}"))?;
+    // Two-way sync: only items the user actually changed on-device are
+    // uploaded (alarm `enabled`, todo `done`/`importance`). Server-side
+    // edits therefore survive the next sync instead of being clobbered by
+    // the device's stale copy; the dirty sets are cleared on success below.
+    let dirty_alarms = alarm_store
+        .dirty_ids()
+        .map_err(|e| anyhow!("failed to load alarm dirty set: {e}"))?;
+    let dirty_todos = todo_store
+        .dirty_ids()
+        .map_err(|e| anyhow!("failed to load todo dirty set: {e}"))?;
     let upload = DeviceSyncRequest {
         alarms: local_alarms
             .iter()
+            .filter(|alarm| dirty_alarms.contains(&alarm.id))
             .map(|alarm| DeviceAlarmState {
                 id: alarm.id,
                 enabled: alarm.enabled,
@@ -128,6 +139,7 @@ pub fn fetch_and_apply(
             .collect(),
         todos: local_todos
             .iter()
+            .filter(|todo| dirty_todos.contains(&todo.id))
             .map(|todo| DeviceTodoState {
                 id: todo.id,
                 done: todo.done,
@@ -196,6 +208,15 @@ pub fn fetch_and_apply(
     inbox_store
         .ack_read(&parsed.inbox_read_acked)
         .map_err(|e| anyhow!("failed to ack inbox reads: {e}"))?;
+    // The merged server state now reflects everything we uploaded, so the
+    // pending local changes are spent. Cleared only here, after a
+    // successful round-trip - a failed sync keeps them for the retry.
+    if let Err(err) = alarm_store.clear_dirty() {
+        log::warn!("Failed to clear alarm dirty set: {err}");
+    }
+    if let Err(err) = todo_store.clear_dirty() {
+        log::warn!("Failed to clear todo dirty set: {err}");
+    }
     if let Err(err) = alarms::program_hardware_alarm(rtc, &parsed.alarms, now) {
         log::warn!("Failed to reprogram hardware alarm after sync: {err}");
     }
@@ -277,6 +298,12 @@ pub fn sync_now(
         now,
     );
 
+    // Daily NTP RTC alignment rides the live connection (SNTP needs Wi-Fi
+    // up); skipped on failed syncs so a dead network retries next time.
+    if outcome.is_ok() {
+        maybe_align_rtc(counters, rtc, now);
+    }
+
     // Disconnect regardless of outcome - nothing else needs Wi-Fi to stay
     // connected after this.
     wifi_mgr.disconnect();
@@ -299,6 +326,34 @@ pub fn sync_now(
     }
 
     outcome
+}
+
+/// Resyncs the PCF8563 over NTP once per day. Must be called while Wi-Fi
+/// is still connected (SNTP cannot start on a dead link) - `sync_now`
+/// calls it before its final disconnect, so the daily check piggybacks on
+/// whichever sync path happened to run. A failed NTP round-trip retries on
+/// the next sync; the alignment timestamp is only recorded on success.
+fn maybe_align_rtc(counters: &PersistedCounters, rtc: &mut Pcf8563, now: &DateTime) {
+    let align_due = match counters.rtc_align_epoch() {
+        Ok(Some(last)) => now.to_unix().saturating_sub(last) >= 24 * 3600,
+        Ok(None) => true,
+        Err(err) => {
+            log::warn!("Failed to read RTC alignment time: {err}");
+            false
+        }
+    };
+    if !align_due {
+        return;
+    }
+    let timezone_offset = counters.timezone_offset_minutes().unwrap_or(0);
+    match wifi::ntp_sync_and_set_rtc(rtc, timezone_offset) {
+        Ok(()) => {
+            if let Err(err) = counters.set_rtc_align_epoch(now.to_unix()) {
+                log::warn!("Failed to record RTC alignment time: {err}");
+            }
+        }
+        Err(err) => log::warn!("Periodic RTC alignment failed: {err}"),
+    }
 }
 
 /// Lightweight urgent-message poll: connects, sends a `POST` with the

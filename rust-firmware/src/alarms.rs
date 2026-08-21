@@ -11,6 +11,8 @@ use crate::rtc::{is_leap, AlarmRegs, DateTime, Pcf8563};
 
 const NAMESPACE: &str = "inkpaper_alrm";
 const KEY_ALARMS: &str = "alarms";
+/// Locally-changed `local_id`s pending upload (two-way sync dirty set).
+const KEY_DIRTY: &str = "dirty";
 /// Generous headroom over what a few dozen short JSON alarm records need;
 /// NVS blob entries top out around ~4000 bytes on this partition anyway.
 const BLOB_BUF_LEN: usize = 1024;
@@ -103,6 +105,48 @@ impl AlarmStore {
         self.nvs
             .set_blob(KEY_ALARMS, &bytes)
             .map_err(|e| anyhow!("NVS set_blob({KEY_ALARMS}) failed: {e}"))
+    }
+
+    // --- Two-way sync dirty tracking -------------------------------------
+    //
+    // Same contract as `TodoStore::mark_dirty`: only `local_id`s whose
+    // `enabled` flag changed *locally* are uploaded, so a Server/Desktop
+    // edit isn't clobbered by the device's stale copy on the next sync.
+
+    /// Marks `id` as locally changed (enabled flag) and pending upload.
+    pub fn mark_dirty(&self, id: u8) -> Result<()> {
+        let mut dirty = self.dirty_ids()?;
+        if !dirty.contains(&id) {
+            dirty.push(id);
+        }
+        let bytes =
+            serde_json::to_vec(&dirty).map_err(|e| anyhow!("dirty JSON encode failed: {e}"))?;
+        self.nvs
+            .set_blob(KEY_DIRTY, &bytes)
+            .map_err(|e| anyhow!("NVS set_blob({KEY_DIRTY}) failed: {e}"))
+    }
+
+    /// `local_id`s changed locally since the last successful sync.
+    pub fn dirty_ids(&self) -> Result<Vec<u8>> {
+        let mut buf = [0u8; BLOB_BUF_LEN];
+        let bytes = self
+            .nvs
+            .get_blob(KEY_DIRTY, &mut buf)
+            .map_err(|e| anyhow!("NVS get_blob({KEY_DIRTY}) failed: {e}"))?;
+        match bytes {
+            Some(bytes) => {
+                serde_json::from_slice(bytes).map_err(|e| anyhow!("dirty JSON decode failed: {e}"))
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Drops the dirty set after a successful sync.
+    pub fn clear_dirty(&self) -> Result<()> {
+        self.nvs
+            .remove(KEY_DIRTY)
+            .map(|_| ())
+            .map_err(|e| anyhow!("NVS remove({KEY_DIRTY}) failed: {e}"))
     }
 }
 

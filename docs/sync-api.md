@@ -21,11 +21,14 @@ Content-Type: application/json
 
 - **Authorization** (required): `Bearer {auth_token}` where `auth_token` is the
   authentication token configured on the device.
-- The device uploads only locally editable state: alarm `enabled`, todo
-  `done`, and todo `importance` (the device can cycle importance with a
-  long-ENTER in the Todos page; `importance` is optional in the upload and
-  old firmware that omits it is still accepted). It never uploads text,
-  schedules, additions, or deletions.
+- The device uploads only locally *changed* state: alarm `enabled`, todo
+  `done`, and todo `importance` for items the user actually toggled on the
+  device since the last successful sync (dirty-set tracking). It never
+  uploads text, schedules, additions, or deletions, and it does not re-upload
+  flags that only the Server/Desktop side edited - so an edit made in the
+  server UI survives the device's next sync instead of being clobbered by the
+  device's stale copy. `importance` is optional in the upload and old
+  firmware that omits it is still accepted.
 - Unknown IDs are ignored, so stale device data cannot recreate content that
   Desktop or Server deleted.
 - The server merges these flags and returns its complete authoritative lists.

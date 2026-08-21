@@ -10,6 +10,7 @@ const KEY_SYNC_ETAG: &str = "sync_etag";
 const KEY_TIMEZONE_OFFSET: &str = "timezone_min";
 const KEY_SYNC_INTERVAL_MIN: &str = "sync_interval_min";
 const KEY_LAST_SYNC_EPOCH: &str = "last_sync_epoch";
+const KEY_RTC_ALIGN_EPOCH: &str = "rtc_align_epoch";
 const KEY_TODO_REMINDED_DATE: &str = "todo_reminded_date";
 
 /// Maximum length of the NVS strings used for Wi-Fi credentials.
@@ -199,6 +200,32 @@ impl PersistedCounters {
             .set_str(KEY_LAST_SYNC_EPOCH, &epoch.to_string())
             .map(|_| ())
             .map_err(|e| anyhow!("NVS set_str({KEY_LAST_SYNC_EPOCH}) failed: {e}"))
+    }
+
+    /// Unix seconds of the last successful periodic NTP RTC alignment, if
+    /// any. `main.rs` uses this to resync the PCF8563 roughly once a day,
+    /// keeping the wall-clock boundaries the cron sync aligns to accurate.
+    pub fn rtc_align_epoch(&self) -> Result<Option<u64>> {
+        let mut buf = [0u8; 20];
+        match self
+            .nvs
+            .get_str(KEY_RTC_ALIGN_EPOCH, &mut buf)
+            .map_err(|e| anyhow!("NVS get_str({KEY_RTC_ALIGN_EPOCH}) failed: {e}"))?
+        {
+            Some(value) => value
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|e| anyhow!("invalid stored rtc-align epoch '{value}': {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Records when the RTC was last aligned via NTP.
+    pub fn set_rtc_align_epoch(&self, epoch: u64) -> Result<()> {
+        self.nvs
+            .set_str(KEY_RTC_ALIGN_EPOCH, &epoch.to_string())
+            .map(|_| ())
+            .map_err(|e| anyhow!("NVS set_str({KEY_RTC_ALIGN_EPOCH}) failed: {e}"))
     }
 
     pub fn timezone_offset_minutes(&self) -> Result<i16> {
