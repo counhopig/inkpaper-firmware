@@ -30,3 +30,6 @@ __pycache__/
 # Local agent/tooling files
 .omo/
 .claude/
+
+# vscode
+.vscode/
