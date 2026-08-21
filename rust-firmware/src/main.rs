@@ -33,7 +33,7 @@ use anyhow::Result;
 use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
 use canvas::{Canvas, Rect};
-use ctx::DeviceContext;
+use ctx::{DeviceContext, SyncScheduler};
 use esp_idf_svc::systime::EspSystemTime;
 use inbox::InboxStore;
 use rtc::DateTime;
@@ -271,6 +271,7 @@ fn main() -> Result<()> {
         todo_store: &todo_store,
         inbox_store: &inbox_store,
         usb_console: &mut usb_console,
+        sync_scheduler: SyncScheduler::new(clock.as_ref(), &counters),
     };
 
     let mut status_tick = 0u32;
@@ -288,11 +289,6 @@ fn main() -> Result<()> {
     // at the top of the hour. Initialized to the boot-time boundary so the
     // first aligned boundary after boot fires (and a never-synced device
     // syncs on its first urgent-poll boundary).
-    let sync_interval_minutes = ctx.counters.sync_interval_minutes().unwrap_or(60) as u64;
-    let boot_unix = clock.map(|dt| dt.to_unix()).unwrap_or(0);
-    let mut last_urgent_boundary = boot_unix / 30;
-    let mut last_full_boundary = boot_unix / (sync_interval_minutes * 60);
-    let never_synced = ctx.counters.last_sync_epoch().unwrap_or(None).is_none();
     let mut ble_control: Option<ble_control::BleControl> = None;
     loop {
         watchdog::feed();
@@ -384,16 +380,11 @@ fn main() -> Result<()> {
                     // boundary actually advanced, so this never adds Wi-Fi
                     // traffic beyond the intended cadence. The due-todo
                     // reminder shares the urgent-poll cadence (once per 30 s
-                    // boundary, gated once/day anyway). Menus block the loop,
-                    // so nothing fires mid-menu; a boundary crossed while
-                    // blocked just fires on the next read.
-                    maybe_auto_sync(
-                        &mut ctx,
-                        &dt,
-                        &mut last_urgent_boundary,
-                        &mut last_full_boundary,
-                        never_synced,
-                    );
+                    // boundary, gated once/day anyway). Ordinary menu loops
+                    // service this same scheduler through DeviceContext.
+                    if ctx.poll_scheduled_sync(&dt) {
+                        dirty.push(FULL_SCREEN_RECT);
+                    }
                     if maybe_remind_due_todos(ctx.board, ctx.counters, ctx.todo_store, Some(&dt)) {
                         dirty.push(FULL_SCREEN_RECT);
                     }
@@ -525,115 +516,6 @@ fn render_home_now(
         battery_percent,
         charge,
     );
-}
-
-/// Cron-style sync entry point, called on every fresh clock read (~1.2 s)
-/// from the main loop. Fires only when a wall-clock *boundary advances*:
-///   - An urgent poll when `unix / 30` advances - i.e. at :00/:30 of each
-///     minute, not on a boot-relative 30 s timer. Lightweight connection,
-///     the server answers immediately; if it reports an unread
-///     high-priority message a full sync runs right away to fetch it.
-///   - A full sync when `unix / (interval*60)` advances - every 1 h fires
-///     at the top of the hour, every 30 m at :00/:30, every 5 m at the
-///     :05 marks, etc. (normal content stays on the slow timer).
-///
-/// Both checks are cheap NVS reads unless a boundary actually advanced, so
-/// the 1.2 s cadence never adds network traffic.
-///
-/// Requires Wi-Fi + server config; failures are logged and retried at the
-/// next boundary. `never_synced` forces the first full sync on the first
-/// urgent-poll boundary after boot so a fresh device gets content promptly.
-fn maybe_auto_sync(
-    ctx: &mut DeviceContext,
-    now: &DateTime,
-    last_urgent_boundary: &mut u64,
-    last_full_boundary: &mut u64,
-    never_synced: bool,
-) {
-    let server_configured = ctx
-        .counters
-        .device_config()
-        .map(|cfg| cfg.is_some())
-        .unwrap_or(false);
-    if !server_configured {
-        return;
-    }
-    let wifi_configured = ctx
-        .counters
-        .wifi_creds()
-        .map(|creds| creds.is_some())
-        .unwrap_or(false);
-    if !wifi_configured {
-        return;
-    }
-    let interval = ctx.counters.sync_interval_minutes().unwrap_or(60) as u64;
-    let unix = now.to_unix();
-    let urgent_boundary = unix / 30;
-    let full_boundary = unix / (interval * 60);
-    if urgent_boundary == *last_urgent_boundary && full_boundary == *last_full_boundary {
-        return;
-    }
-
-    // Urgent poll at each 30 s boundary: short connection, immediate
-    // answer. If the server reports an unread high-priority message, do a
-    // full sync now to pull it in real time.
-    let urgent_fired = if urgent_boundary != *last_urgent_boundary {
-        *last_urgent_boundary = urgent_boundary;
-        match sync::poll_urgent(ctx.counters, ctx.wifi_mgr) {
-            Ok(true) => {
-                log::info!("Urgent message available; syncing");
-                run_full_sync(ctx, now);
-                return;
-            }
-            Ok(false) => {}
-            Err(err) => log::warn!("Urgent poll failed: {err}"),
-        }
-        true
-    } else {
-        false
-    };
-
-    // Full sync at each interval boundary. A never-synced device (fresh
-    // flash / wiped NVS) syncs on its first urgent-poll boundary (~30 s
-    // after boot) instead of waiting for the next interval boundary.
-    if full_boundary != *last_full_boundary || (never_synced && urgent_fired) {
-        *last_full_boundary = full_boundary;
-        log::info!("Aligned sync due (interval {interval} min); syncing");
-        run_full_sync(ctx, now);
-    }
-}
-
-/// Runs a full `sync::sync_now` and refreshes the home screen on success.
-/// (The once-per-day NTP RTC alignment lives inside `sync::sync_now`,
-/// where Wi-Fi is still connected; `maybe_align_rtc` there keeps the
-/// PCF8563's drift from pulling the cron sync boundaries off the real
-/// wall clock.)
-fn run_full_sync(ctx: &mut DeviceContext, now: &DateTime) {
-    match sync::sync_now(
-        ctx.counters,
-        ctx.wifi_mgr,
-        ctx.alarm_store,
-        ctx.todo_store,
-        ctx.inbox_store,
-        &mut ctx.board.rtc,
-        now,
-    ) {
-        Ok(_) => {
-            log::info!("Full sync completed");
-            render_home_now(
-                ctx.board,
-                ctx.counters,
-                ctx.alarm_store,
-                ctx.todo_store,
-                ctx.inbox_store,
-                Some(now),
-            );
-            ctx.board
-                .display
-                .refresh_partial_best_effort(FULL_SCREEN_RECT);
-        }
-        Err(err) => log::warn!("Full sync failed: {err}"),
-    }
 }
 
 fn report_power_state(board: &mut Note4Board) -> Result<()> {

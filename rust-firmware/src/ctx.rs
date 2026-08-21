@@ -11,6 +11,8 @@
 //! `board`, `wifi_mgr`, and `usb_console` need `&'a mut`. This lets a function read a store
 //! and mutate the board in the same scope without fighting the borrow checker.
 
+use std::time::{Duration, Instant};
+
 use crate::alarms::AlarmStore;
 use crate::board::Note4Board;
 use crate::control::{self, Command, Reply};
@@ -20,6 +22,29 @@ use crate::storage::PersistedCounters;
 use crate::todos::TodoStore;
 use crate::usb_console::UsbConsole;
 use crate::wifi::WifiManager;
+
+/// Wall-clock sync cursors shared by Home and every blocking UI loop.
+/// Keeping them here prevents each screen from inventing its own timer and
+/// ensures a successful first sync disables the fresh-device fast path.
+pub struct SyncScheduler {
+    last_urgent_boundary: u64,
+    last_full_boundary: u64,
+    never_synced: bool,
+    last_ui_poll: Instant,
+}
+
+impl SyncScheduler {
+    pub fn new(now: Option<&DateTime>, counters: &PersistedCounters) -> Self {
+        let unix = now.map(|dt| dt.to_unix()).unwrap_or(0);
+        let interval = counters.sync_interval_minutes().unwrap_or(60) as u64;
+        Self {
+            last_urgent_boundary: unix / 30,
+            last_full_boundary: unix / (interval * 60),
+            never_synced: counters.last_sync_epoch().unwrap_or(None).is_none(),
+            last_ui_poll: Instant::now(),
+        }
+    }
+}
 
 /// All of the firmware's shared, long-lived state, created once in `main()`
 /// and threaded through the UI/sync/control layers by reference.
@@ -31,6 +56,7 @@ pub struct DeviceContext<'a> {
     pub todo_store: &'a TodoStore,
     pub inbox_store: &'a InboxStore,
     pub usb_console: &'a mut UsbConsole,
+    pub sync_scheduler: SyncScheduler,
 }
 
 impl DeviceContext<'_> {
@@ -46,5 +72,93 @@ impl DeviceContext<'_> {
         let reply = control::dispatch(self, cmd, fresh_now.as_ref().or(now));
         crate::usb_console::write_reply(&reply);
         changes_visible_state && matches!(reply, Reply::Ok)
+    }
+
+    /// Services USB plus wall-clock scheduled sync while an ordinary screen
+    /// owns the main thread. BLE pairing deliberately calls
+    /// `poll_usb_control` directly because BLE and Wi-Fi share the radio.
+    pub fn poll_background(&mut self, now: Option<&DateTime>) -> bool {
+        let usb_changed = self.poll_usb_control(now);
+        let sync_changed = if self.sync_scheduler.last_ui_poll.elapsed() >= Duration::from_secs(1) {
+            self.sync_scheduler.last_ui_poll = Instant::now();
+            self.board
+                .rtc
+                .read_time()
+                .ok()
+                .is_some_and(|fresh| self.poll_scheduled_sync(&fresh))
+        } else {
+            false
+        };
+        usb_changed || sync_changed
+    }
+
+    /// Runs an urgent/full sync when its wall-clock boundary advances.
+    /// Returns true only when a full sync applied state that callers should
+    /// redraw. Failed attempts are retried at the next boundary.
+    pub fn poll_scheduled_sync(&mut self, now: &DateTime) -> bool {
+        let server_configured = self
+            .counters
+            .device_config()
+            .map(|cfg| cfg.is_some())
+            .unwrap_or(false);
+        let wifi_configured = self
+            .counters
+            .wifi_creds()
+            .map(|creds| creds.is_some())
+            .unwrap_or(false);
+        if !server_configured || !wifi_configured {
+            return false;
+        }
+
+        let interval = self.counters.sync_interval_minutes().unwrap_or(60) as u64;
+        let unix = now.to_unix();
+        let urgent_boundary = unix / 30;
+        let full_boundary = unix / (interval * 60);
+        let urgent_due = urgent_boundary != self.sync_scheduler.last_urgent_boundary;
+        let full_due = full_boundary != self.sync_scheduler.last_full_boundary;
+        if !urgent_due && !full_due {
+            return false;
+        }
+
+        if urgent_due {
+            self.sync_scheduler.last_urgent_boundary = urgent_boundary;
+            match crate::sync::poll_urgent(self.counters, self.wifi_mgr) {
+                Ok(true) => {
+                    log::info!("Urgent message available; syncing");
+                    return self.run_full_sync(now);
+                }
+                Ok(false) => {}
+                Err(err) => log::warn!("Urgent poll failed: {err}"),
+            }
+        }
+
+        if full_due || (self.sync_scheduler.never_synced && urgent_due) {
+            self.sync_scheduler.last_full_boundary = full_boundary;
+            log::info!("Aligned sync due (interval {interval} min); syncing");
+            return self.run_full_sync(now);
+        }
+        false
+    }
+
+    fn run_full_sync(&mut self, now: &DateTime) -> bool {
+        match crate::sync::sync_now(
+            self.counters,
+            self.wifi_mgr,
+            self.alarm_store,
+            self.todo_store,
+            self.inbox_store,
+            &mut self.board.rtc,
+            now,
+        ) {
+            Ok(_) => {
+                self.sync_scheduler.never_synced = false;
+                log::info!("Full sync completed");
+                true
+            }
+            Err(err) => {
+                log::warn!("Full sync failed: {err}");
+                false
+            }
+        }
     }
 }

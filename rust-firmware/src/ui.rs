@@ -162,7 +162,7 @@ pub fn pick_from_list(
     let mut needs_redraw = true;
     let mut first_draw = true;
     loop {
-        let _ = ctx.poll_usb_control(now);
+        let _ = ctx.poll_background(now);
         if needs_redraw {
             let canvas = ctx.board.display.canvas_mut();
             draw_rows(canvas, title, items, selected);
@@ -215,7 +215,7 @@ pub fn pick_number(
     let mut needs_redraw = true;
     let mut first_draw = true;
     loop {
-        let _ = ctx.poll_usb_control(now);
+        let _ = ctx.poll_background(now);
         if needs_redraw {
             let canvas = ctx.board.display.canvas_mut();
             canvas.clear();

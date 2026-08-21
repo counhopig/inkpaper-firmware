@@ -114,7 +114,7 @@ pub fn open_menu(
 
 /// Pick the automatic sync interval from preset options (1/5/10/30/60
 /// minutes). The device re-syncs with the configured server every this many
-/// minutes while idle on Home (see `main.rs`'s `maybe_auto_sync`). Returns
+/// minutes through the shared scheduler in `DeviceContext`. Returns
 /// `true` when the user long-pressed UP/DOWN, so the caller can open the
 /// navigation drawer (this screen lacks the full context to do so itself).
 fn sync_interval_screen(ctx: &mut DeviceContext, now: Option<&DateTime>) -> bool {
@@ -254,7 +254,7 @@ fn pick_navigation(
     let mut selected = current_index;
     let mut needs_redraw = true;
     loop {
-        let _ = ctx.poll_usb_control(now);
+        let _ = ctx.poll_background(now);
         if needs_redraw {
             let canvas = ctx.board.display.canvas_mut();
             draw_navigation_bar(canvas, selected);
@@ -339,7 +339,7 @@ fn browse_page(
     let mut needs_redraw = true;
     let mut first_draw = true;
     loop {
-        if ctx.poll_usb_control(live_now.as_ref()) {
+        if ctx.poll_background(live_now.as_ref()) {
             if let Ok(fresh) = ctx.board.rtc.read_time() {
                 live_now = Some(fresh);
             }
@@ -1145,7 +1145,7 @@ fn open_inbox_item(ctx: &mut DeviceContext, now: Option<&DateTime>, selected: us
     footer(canvas, "ENTER / HOLD ENTER CLOSE");
     ctx.board.display.refresh_full_best_effort();
     loop {
-        if ctx.poll_usb_control(now) {
+        if ctx.poll_background(now) {
             return;
         }
         match poll_nav(ctx.board) {
