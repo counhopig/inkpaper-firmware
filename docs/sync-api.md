@@ -150,6 +150,41 @@ Each todo object:
   dates. When set, the todo is due on every date the schedule covers, and
   the calendar/reminder logic uses the schedule instead of `due_date`.
 
+**`inbox`** (array, optional, default `[]`): Inbox notifications pushed to
+the device from external sources (webhooks, CI, agents) via the server.
+Capped at 20 items per response; `inbox_truncated` is `true` when the server
+has more.
+
+Each inbox item:
+- **`id`** (u64): Device-visible stable id (the server's per-device `seq`,
+  monotonic). Used for dedup and read-ack.
+- **`kind`** (enum): `"alert"` | `"event"` | `"info"`.
+- **`priority`** (enum, optional, default `"normal"`): `"normal"` | `"high"`.
+  `high` messages are urgent: the device shows a full-screen "URGENT"
+  reminder with a persistent tone as soon as they arrive.
+- **`title`** (string): Short message title.
+- **`body`** (string, optional): Longer detail.
+- **`when`** (i64 or null, optional): Unix epoch the message relates to.
+- **`read`** (bool): Whether the device has marked it read.
+
+**`inbox_read_acked`** (array, optional): The `seq`s the device uploaded as
+read that the server acknowledged; the firmware drops these from its local
+pending-read set.
+
+**`inbox_truncated`** (bool, optional): `true` when the server has more inbox
+items than it could fit in this response.
+
+#### Long-polling (urgent delivery)
+
+The device may include an `X-Inkpaper-Wait: 1` header on `POST /api/sync`.
+The server then holds the connection (polling internally, up to a ~30s
+timeout) until an unread `high`-priority inbox message exists, returning
+immediately when one arrives. This keeps the device's Wi-Fi connected during
+the hold and surfaces urgent messages in real time instead of re-connecting
+on a timer. When no urgent message arrives, the request returns after the
+timeout with whatever inbox it has. This is how the firmware's urgent
+reminder gets messages without an aggressive polling interval.
+
 #### ETag Header (optional)
 
 The server includes an **ETag** header on the response, and the firmware

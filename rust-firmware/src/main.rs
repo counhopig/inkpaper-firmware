@@ -303,7 +303,16 @@ fn main() -> Result<()> {
                 clock.as_ref(),
             );
             maybe_remind_due_todos(&mut board, &counters, &todo_store, clock.as_ref());
-            maybe_remind_inbox_alerts(&mut board, &inbox_store, clock.as_ref());
+            long_poll_urgent(
+                &mut board,
+                &counters,
+                &mut wifi_mgr,
+                &alarm_store,
+                &todo_store,
+                &inbox_store,
+                clock.as_ref(),
+            );
+            maybe_remind_urgent_inbox(&mut board, &inbox_store);
         }
 
         let mut dirty: Vec<Rect> = Vec::new();
@@ -545,6 +554,7 @@ fn maybe_auto_sync(
         inbox_store,
         &mut board.rtc,
         now,
+        false,
     ) {
         Ok(_) => {
             log::info!("Automatic periodic sync completed");
@@ -715,48 +725,92 @@ fn remind_due_todos_screen(board: &mut Note4Board, due: &[&Todo]) {
     }
 }
 
-/// Pops unread `alert`-kind inbox items as full-screen reminders (up to 3 per
-/// check, newest first), marking each read locally so it can't re-ring. Runs
-/// only while idle on Home (the main loop is blocked inside menus). If the
-/// device has no audio, the screen still shows and ENTER dismisses it.
-fn maybe_remind_inbox_alerts(
+/// Long-poll for urgent inbox messages: performs a sync with the long-poll
+/// flag so the server holds the connection until an unread high-priority
+/// message arrives (or its timeout). Keeps the device's Wi-Fi connected for
+/// the hold instead of re-connecting on a timer - both more real-time and
+/// gentler on the radio. Runs while idle on Home (the main loop blocks inside
+/// menus). Only active when Wi-Fi + server are configured.
+fn long_poll_urgent(
     board: &mut Note4Board,
+    counters: &PersistedCounters,
+    wifi_mgr: &mut wifi::WifiManager,
+    alarm_store: &AlarmStore,
+    todo_store: &TodoStore,
     inbox_store: &InboxStore,
-    _clock: Option<&DateTime>,
+    clock: Option<&DateTime>,
 ) {
+    let Some(now) = clock else {
+        return;
+    };
+    let server_configured = counters
+        .device_config()
+        .map(|cfg| cfg.is_some())
+        .unwrap_or(false);
+    let wifi_configured = counters
+        .wifi_creds()
+        .map(|creds| creds.is_some())
+        .unwrap_or(false);
+    if !server_configured || !wifi_configured {
+        return;
+    }
+    match sync::sync_now(
+        counters,
+        wifi_mgr,
+        alarm_store,
+        todo_store,
+        inbox_store,
+        &mut board.rtc,
+        now,
+        true,
+    ) {
+        Ok(_) => {
+            log::info!("Long-poll sync completed");
+            render_home_now(board, counters, alarm_store, todo_store, inbox_store, clock);
+            if let Err(err) = board.display.refresh_partial(FULL_SCREEN_RECT) {
+                log::warn!("Failed to refresh display after long-poll sync: {err}");
+            }
+        }
+        Err(err) => log::warn!("Long-poll sync failed: {err}"),
+    }
+}
+
+/// Shows unread urgent (high-priority alert) inbox items as a full-screen
+/// reminder with an insistent tone, marking each read locally so it can't
+/// re-ring. The long-poll sync above fetches them in real time; this renders
+/// them. Runs only while idle on Home.
+fn maybe_remind_urgent_inbox(board: &mut Note4Board, inbox_store: &InboxStore) {
     let Ok(list) = inbox_store.load() else {
         return;
     };
-    let alerts: Vec<u64> = list
-        .iter()
-        .filter(|it| !it.read && it.kind == inbox::InboxKind::Alert)
-        .map(|it| it.id)
-        .take(3)
-        .collect();
-    if alerts.is_empty() {
+    let urgent: Vec<u64> = inbox_store
+        .unread_urgent()
+        .unwrap_or_default();
+    if urgent.is_empty() {
         return;
     }
-    for seq in &alerts {
+    for seq in &urgent {
         if let Err(err) = inbox_store.mark_read(*seq) {
-            log::warn!("Failed to mark inbox alert read: {err}");
+            log::warn!("Failed to mark urgent inbox read: {err}");
         }
     }
     let titles: Vec<String> = list
         .iter()
-        .filter(|it| alerts.contains(&it.id))
+        .filter(|it| urgent.contains(&it.id))
         .map(|it| it.title.chars().take(34).collect::<String>())
         .collect();
-    log::info!("{} inbox alert(s) to show", titles.len());
-    remind_inbox_alert_screen(board, &titles);
+    log::info!("{} urgent inbox message(s) to show", titles.len());
+    remind_urgent_screen(board, &titles);
 }
 
-/// Full-screen inbox alert: title(s), an optional short tone, then a blocking
-/// wait for ENTER. Same shape as `remind_due_todos_screen`.
-fn remind_inbox_alert_screen(board: &mut Note4Board, titles: &[String]) {
+/// Full-screen urgent reminder: title(s) with a persistent tone loop until
+/// ENTER dismisses it. Distinct from the normal alert by a longer, repeated
+/// tone and a "URGENT" heading so urgent messages are unmistakable.
+fn remind_urgent_screen(board: &mut Note4Board, titles: &[String]) {
     let canvas = board.display.canvas_mut();
     canvas.clear();
     canvas.draw_text_prop(16, 40, 1, "INKPAPER");
-    canvas.draw_text_prop(16, 60, 2, "NEW ALERT");
+    canvas.draw_text_prop(16, 60, 2, "URGENT");
     for (i, title) in titles.iter().take(4).enumerate() {
         canvas.draw_text_prop(16, 100 + i * 24, 1, &format!("!! {title}"));
     }
@@ -766,16 +820,8 @@ fn remind_inbox_alert_screen(board: &mut Note4Board, titles: &[String]) {
     canvas.draw_text_prop(16, 284, 1, "ENTER = DISMISS");
     let _ = board.display.refresh_full();
 
-    if let Some(audio) = board.audio.as_mut() {
-        for _ in 0..3 {
-            if let Err(err) = audio.play_sine_stereo(1046.0, 0.15, 8000) {
-                log::warn!("Inbox alert tone failed: {err}");
-                break;
-            }
-            thread::sleep(Duration::from_millis(150));
-        }
-    }
-
+    // Persistent tone bursts until dismissed - urgent messages keep beeping,
+    // unlike the normal short alert.
     loop {
         watchdog::feed();
         if let Some(event) = board.key_enter.poll() {
@@ -783,6 +829,13 @@ fn remind_inbox_alert_screen(board: &mut Note4Board, titles: &[String]) {
                 break;
             }
         }
-        thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
+        if let Some(audio) = board.audio.as_mut() {
+            if let Err(err) = audio.play_sine_stereo(1046.0, 0.15, 8000) {
+                log::warn!("Urgent tone playback failed: {err}");
+            }
+            thread::sleep(Duration::from_millis(300));
+        } else {
+            thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
+        }
     }
 }

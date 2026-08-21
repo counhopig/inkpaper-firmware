@@ -91,6 +91,7 @@ pub fn fetch_and_apply(
     server_url: &str,
     token: &str,
     _etag: Option<&str>,
+    long_poll: bool,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
     inbox_store: &InboxStore,
@@ -150,6 +151,13 @@ pub fn fetch_and_apply(
     if !token.is_empty() {
         auth_header = format!("Bearer {token}");
         headers.push(("authorization", &auth_header));
+    }
+    // Long-poll: ask the server to hold the connection until an unread
+    // high-priority inbox message arrives (or a timeout). This keeps the
+    // device's Wi-Fi connected and surfaces urgent messages in real time
+    // instead of re-connecting on a timer.
+    if long_poll {
+        headers.push(("x-inkpaper-wait", "1"));
     }
     let mut request = client
         .request(Method::Post, server_url, &headers)
@@ -237,6 +245,7 @@ pub fn sync_now(
     inbox_store: &InboxStore,
     rtc: &mut Pcf8563,
     now: &DateTime,
+    long_poll: bool,
 ) -> Result<SyncOutcome> {
     let creds = counters
         .wifi_creds()
@@ -269,6 +278,7 @@ pub fn sync_now(
         &cfg.server_url,
         &cfg.auth_token,
         etag.as_deref(),
+        long_poll,
         alarm_store,
         todo_store,
         inbox_store,

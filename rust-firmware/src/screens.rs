@@ -1091,6 +1091,7 @@ fn sync_now_screen(
         inbox_store,
         &mut board.rtc,
         now_dt,
+        false,
     ) {
         Ok(sync::SyncOutcome::Applied {
             alarm_count,

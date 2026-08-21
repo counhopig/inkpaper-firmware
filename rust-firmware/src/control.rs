@@ -184,6 +184,7 @@ pub fn dispatch(
                 inbox_store,
                 &mut board.rtc,
                 now_dt,
+                false,
             ) {
                 Ok(sync::SyncOutcome::Applied {
                     alarm_count,

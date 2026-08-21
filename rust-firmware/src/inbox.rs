@@ -28,11 +28,25 @@ pub enum InboxKind {
     Info,
 }
 
+/// Inbox notification priority, wire-compatible with the server's `Priority`
+/// (`"normal"`/`"high"`). `High` alerts trigger an urgent full-screen
+/// reminder with an insistent tone; the sync client long-polls for them so
+/// they surface in real time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    #[default]
+    Normal,
+    High,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InboxItem {
     /// Device-visible stable id (server `seq`, monotonic).
     pub id: u64,
     pub kind: InboxKind,
+    #[serde(default)]
+    pub priority: Priority,
     pub title: String,
     #[serde(default)]
     pub body: String,
@@ -150,5 +164,16 @@ impl InboxStore {
     /// have been notified also count as unread until the user opens them.
     pub fn unread_count(&self) -> Result<usize> {
         Ok(self.load()?.iter().filter(|it| !it.read).count())
+    }
+
+    /// The `seq`s of unread high-priority `alert` items, in store order. These
+    /// drive the urgent full-screen reminder + tone.
+    pub fn unread_urgent(&self) -> Result<Vec<u64>> {
+        Ok(self
+            .load()?
+            .iter()
+            .filter(|it| !it.read && it.priority == Priority::High && it.kind == InboxKind::Alert)
+            .map(|it| it.id)
+            .collect())
     }
 }
