@@ -10,6 +10,7 @@ mod font5x7;
 mod font8x16;
 mod home;
 mod icons;
+mod inbox;
 mod nfc;
 mod power;
 mod rtc;
@@ -31,6 +32,7 @@ use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
 use canvas::Rect;
 use esp_idf_svc::systime::EspSystemTime;
+use inbox::InboxStore;
 use rtc::DateTime;
 use storage::PersistedCounters;
 use todos::{Importance, Todo, TodoStore};
@@ -103,7 +105,8 @@ fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("failed to initialise default NVS partition: {e}"))?;
     let counters = PersistedCounters::open(nvs_partition.clone())?;
     let alarm_store = AlarmStore::open(nvs_partition.clone())?;
-    let todo_store = TodoStore::open(nvs_partition)?;
+    let todo_store = TodoStore::open(nvs_partition.clone())?;
+    let inbox_store = InboxStore::open(nvs_partition)?;
     let mut usb_console = usb_console::UsbConsole::start();
 
     // Wi-Fi/NTP resync is needed only when the battery-backed RTC cannot be
@@ -189,6 +192,7 @@ fn main() -> Result<()> {
         &counters,
         &alarm_store,
         &todo_store,
+        &inbox_store,
         clock.as_ref(),
     );
     board.display.refresh_full()?;
@@ -241,6 +245,7 @@ fn main() -> Result<()> {
                                     &counters,
                                     &alarm_store,
                                     &todo_store,
+                                    &inbox_store,
                                     clock.as_ref(),
                                 );
                                 board.display.refresh_partial(CLOCK_RECT)?;
@@ -294,9 +299,11 @@ fn main() -> Result<()> {
                 &mut wifi_mgr,
                 &alarm_store,
                 &todo_store,
+                &inbox_store,
                 clock.as_ref(),
             );
             maybe_remind_due_todos(&mut board, &counters, &todo_store, clock.as_ref());
+            maybe_remind_inbox_alerts(&mut board, &inbox_store, clock.as_ref());
         }
 
         let mut dirty: Vec<Rect> = Vec::new();
@@ -333,6 +340,7 @@ fn main() -> Result<()> {
                 &mut wifi_mgr,
                 &alarm_store,
                 &todo_store,
+                &inbox_store,
                 clock.as_ref(),
             );
             if needs_full_redraw && matches!(reply, control::Reply::Ok) {
@@ -352,6 +360,7 @@ fn main() -> Result<()> {
                     &mut wifi_mgr,
                     &alarm_store,
                     &todo_store,
+                    &inbox_store,
                     clock.as_ref(),
                 );
                 if needs_full_redraw && matches!(reply, control::Reply::Ok) {
@@ -387,6 +396,7 @@ fn main() -> Result<()> {
                         &mut wifi_mgr,
                         &alarm_store,
                         &todo_store,
+                        &inbox_store,
                         clock.as_ref(),
                         &mut ble_control,
                     );
@@ -409,6 +419,7 @@ fn main() -> Result<()> {
                         &mut wifi_mgr,
                         &alarm_store,
                         &todo_store,
+                        &inbox_store,
                         clock.as_ref(),
                         &mut ble_control,
                     );
@@ -424,6 +435,7 @@ fn main() -> Result<()> {
                 &counters,
                 &alarm_store,
                 &todo_store,
+                &inbox_store,
                 clock.as_ref(),
             );
             if dirty
@@ -453,10 +465,12 @@ fn render_home_now(
     counters: &PersistedCounters,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     clock: Option<&DateTime>,
 ) {
     let next_alarm = clock.and_then(|dt| screens::next_alarm_label(alarm_store, dt));
     let todo_summary = screens::todo_summary(todo_store, clock);
+    let unread_inbox = inbox_store.unread_count().unwrap_or(0);
     let wifi_configured = counters
         .wifi_creds()
         .map(|creds| creds.is_some())
@@ -473,6 +487,7 @@ fn render_home_now(
         next_alarm.as_ref().map(|label| label.days_left),
         todo_summary.pending,
         todo_summary.due_today,
+        unread_inbox,
         wifi_configured,
         battery_percent,
         charge,
@@ -493,6 +508,7 @@ fn maybe_auto_sync(
     wifi_mgr: &mut wifi::WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     clock: Option<&DateTime>,
 ) {
     let Some(now) = clock else {
@@ -526,12 +542,13 @@ fn maybe_auto_sync(
         wifi_mgr,
         alarm_store,
         todo_store,
+        inbox_store,
         &mut board.rtc,
         now,
     ) {
         Ok(_) => {
             log::info!("Automatic periodic sync completed");
-            render_home_now(board, counters, alarm_store, todo_store, clock);
+            render_home_now(board, counters, alarm_store, todo_store, inbox_store, clock);
             if let Err(err) = board.display.refresh_partial(FULL_SCREEN_RECT) {
                 log::warn!("Failed to refresh display after auto sync: {err}");
             }
@@ -681,6 +698,78 @@ fn remind_due_todos_screen(board: &mut Note4Board, due: &[&Todo]) {
         for _ in 0..3 {
             if let Err(err) = audio.play_sine_stereo(1046.0, 0.15, 8000) {
                 log::warn!("Todo reminder tone failed: {err}");
+                break;
+            }
+            thread::sleep(Duration::from_millis(150));
+        }
+    }
+
+    loop {
+        watchdog::feed();
+        if let Some(event) = board.key_enter.poll() {
+            if matches!(event, ButtonEvent::Pressed | ButtonEvent::LongPressed) {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
+    }
+}
+
+/// Pops unread `alert`-kind inbox items as full-screen reminders (up to 3 per
+/// check, newest first), marking each read locally so it can't re-ring. Runs
+/// only while idle on Home (the main loop is blocked inside menus). If the
+/// device has no audio, the screen still shows and ENTER dismisses it.
+fn maybe_remind_inbox_alerts(
+    board: &mut Note4Board,
+    inbox_store: &InboxStore,
+    _clock: Option<&DateTime>,
+) {
+    let Ok(list) = inbox_store.load() else {
+        return;
+    };
+    let alerts: Vec<u64> = list
+        .iter()
+        .filter(|it| !it.read && it.kind == inbox::InboxKind::Alert)
+        .map(|it| it.id)
+        .take(3)
+        .collect();
+    if alerts.is_empty() {
+        return;
+    }
+    for seq in &alerts {
+        if let Err(err) = inbox_store.mark_read(*seq) {
+            log::warn!("Failed to mark inbox alert read: {err}");
+        }
+    }
+    let titles: Vec<String> = list
+        .iter()
+        .filter(|it| alerts.contains(&it.id))
+        .map(|it| it.title.chars().take(34).collect::<String>())
+        .collect();
+    log::info!("{} inbox alert(s) to show", titles.len());
+    remind_inbox_alert_screen(board, &titles);
+}
+
+/// Full-screen inbox alert: title(s), an optional short tone, then a blocking
+/// wait for ENTER. Same shape as `remind_due_todos_screen`.
+fn remind_inbox_alert_screen(board: &mut Note4Board, titles: &[String]) {
+    let canvas = board.display.canvas_mut();
+    canvas.clear();
+    canvas.draw_text_prop(16, 40, 1, "INKPAPER");
+    canvas.draw_text_prop(16, 60, 2, "NEW ALERT");
+    for (i, title) in titles.iter().take(4).enumerate() {
+        canvas.draw_text_prop(16, 100 + i * 24, 1, &format!("!! {title}"));
+    }
+    if titles.len() > 4 {
+        canvas.draw_text_prop(16, 268, 1, "MORE IN INBOX...");
+    }
+    canvas.draw_text_prop(16, 284, 1, "ENTER = DISMISS");
+    let _ = board.display.refresh_full();
+
+    if let Some(audio) = board.audio.as_mut() {
+        for _ in 0..3 {
+            if let Err(err) = audio.play_sine_stereo(1046.0, 0.15, 8000) {
+                log::warn!("Inbox alert tone failed: {err}");
                 break;
             }
             thread::sleep(Duration::from_millis(150));

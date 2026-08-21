@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::alarms::AlarmStore;
 use crate::board::Note4Board;
+use crate::inbox::InboxStore;
 use crate::rtc::DateTime;
 use crate::storage::{DeviceConfig, PersistedCounters, WifiCreds};
 use crate::sync;
@@ -98,6 +99,7 @@ pub fn dispatch(
     wifi_mgr: &mut wifi::WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     now: Option<&DateTime>,
 ) -> Reply {
     match cmd {
@@ -179,16 +181,18 @@ pub fn dispatch(
                 wifi_mgr,
                 alarm_store,
                 todo_store,
+                inbox_store,
                 &mut board.rtc,
                 now_dt,
             ) {
                 Ok(sync::SyncOutcome::Applied {
                     alarm_count,
                     todo_count,
+                    inbox_count,
                     ..
                 }) => {
                     log::info!(
-                        "USB control sync completed: {alarm_count} alarms, {todo_count} todos"
+                        "USB control sync completed: {alarm_count} alarms, {todo_count} todos, {inbox_count} inbox"
                     );
                     Reply::Ok
                 }

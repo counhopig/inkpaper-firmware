@@ -15,6 +15,7 @@ use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConne
 use serde::{Deserialize, Serialize};
 
 use crate::alarms::{self, AlarmStore, StoredAlarm};
+use crate::inbox::{InboxItem, InboxStore};
 use crate::rtc::{DateTime, Pcf8563};
 use crate::storage::PersistedCounters;
 use crate::todos::{Importance, Todo, TodoStore};
@@ -23,9 +24,9 @@ use crate::wifi;
 
 /// Response bodies from a compliant server are small (alarms/todos are
 /// themselves capped to a couple KB each in NVS - see `alarms::BLOB_BUF_LEN`
-/// / `todos::BLOB_BUF_LEN`); a fixed buffer avoids a heap-growing read loop
-/// for a payload this bounded.
-const RESPONSE_BUF_LEN: usize = 8192;
+/// / `todos::BLOB_BUF_LEN`); the inbox adds up to 20 small items. A fixed
+/// buffer avoids a heap-growing read loop for a payload this bounded.
+const RESPONSE_BUF_LEN: usize = 16384;
 
 /// Outcome of a bidirectional sync after the merged server state is applied.
 #[derive(Clone, Debug)]
@@ -33,6 +34,8 @@ pub enum SyncOutcome {
     Applied {
         alarm_count: usize,
         todo_count: usize,
+        inbox_count: usize,
+        inbox_truncated: bool,
         etag: Option<String>,
     },
 }
@@ -46,12 +49,20 @@ struct SyncResponse {
     alarms: Vec<StoredAlarm>,
     #[serde(default)]
     todos: Vec<Todo>,
+    #[serde(default)]
+    inbox: Vec<InboxItem>,
+    #[serde(default)]
+    inbox_read_acked: Vec<u64>,
+    #[serde(default)]
+    inbox_truncated: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct DeviceSyncRequest {
     alarms: Vec<DeviceAlarmState>,
     todos: Vec<DeviceTodoState>,
+    #[serde(default)]
+    inbox_read: Vec<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +93,7 @@ pub fn fetch_and_apply(
     _etag: Option<&str>,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     rtc: &mut Pcf8563,
     now: &DateTime,
 ) -> Result<SyncOutcome> {
@@ -102,6 +114,9 @@ pub fn fetch_and_apply(
     let local_todos = todo_store
         .load()
         .map_err(|e| anyhow!("failed to load local todos for upload: {e}"))?;
+    let pending_read = inbox_store
+        .pending_read()
+        .map_err(|e| anyhow!("failed to load pending inbox reads for upload: {e}"))?;
     let upload = DeviceSyncRequest {
         alarms: local_alarms
             .iter()
@@ -121,6 +136,7 @@ pub fn fetch_and_apply(
                 importance: Some(todo.importance),
             })
             .collect(),
+        inbox_read: pending_read,
     };
     let request_body =
         serde_json::to_vec(&upload).map_err(|e| anyhow!("device sync JSON encode failed: {e}"))?;
@@ -173,19 +189,29 @@ pub fn fetch_and_apply(
     todo_store
         .save(&parsed.todos)
         .map_err(|e| anyhow!("failed to save synced todos: {e}"))?;
+    inbox_store
+        .save(&parsed.inbox)
+        .map_err(|e| anyhow!("failed to save synced inbox: {e}"))?;
+    inbox_store
+        .ack_read(&parsed.inbox_read_acked)
+        .map_err(|e| anyhow!("failed to ack inbox reads: {e}"))?;
     if let Err(err) = alarms::program_hardware_alarm(rtc, &parsed.alarms, now) {
         log::warn!("Failed to reprogram hardware alarm after sync: {err}");
     }
 
     log::info!(
-        "Sync applied: {} alarms, {} todos",
+        "Sync applied: {} alarms, {} todos, {} inbox (truncated={})",
         parsed.alarms.len(),
-        parsed.todos.len()
+        parsed.todos.len(),
+        parsed.inbox.len(),
+        parsed.inbox_truncated
     );
 
     Ok(SyncOutcome::Applied {
         alarm_count: parsed.alarms.len(),
         todo_count: parsed.todos.len(),
+        inbox_count: parsed.inbox.len(),
+        inbox_truncated: parsed.inbox_truncated,
         etag: new_etag,
     })
 }
@@ -208,6 +234,7 @@ pub fn sync_now(
     wifi_mgr: &mut wifi::WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     rtc: &mut Pcf8563,
     now: &DateTime,
 ) -> Result<SyncOutcome> {
@@ -244,6 +271,7 @@ pub fn sync_now(
         etag.as_deref(),
         alarm_store,
         todo_store,
+        inbox_store,
         rtc,
         now,
     );

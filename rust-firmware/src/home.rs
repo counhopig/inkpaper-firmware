@@ -28,6 +28,7 @@ pub fn render(
     next_alarm_days_left: Option<i64>,
     todo_pending: usize,
     todo_due_today: usize,
+    unread_inbox: usize,
     wifi_configured: bool,
     battery_percent: Option<u8>,
     charge: ChargeSnapshot,
@@ -81,6 +82,20 @@ pub fn render(
         let wifi_x = battery_x.saturating_sub(8 + icons::WIFI.width as usize);
         let wifi_y = 7 + battery_icon.rows.len() - icons::WIFI.rows.len();
         icons::draw_icon(canvas, wifi_x, wifi_y, &icons::WIFI);
+    }
+    // Unread-inbox badge: a small boxed count in the status cluster so new
+    // notifications are visible at a glance without opening the INBOX page.
+    if unread_inbox > 0 {
+        let label = if unread_inbox > 99 {
+            "99+".to_string()
+        } else {
+            unread_inbox.to_string()
+        };
+        let label_w = Canvas::text_prop_width(&label, 1);
+        let box_w = label_w + 10;
+        let box_x = battery_x.saturating_sub(8 + box_w);
+        canvas.stroke_rect(box_x, 7, box_w, 15, 2);
+        canvas.draw_text_prop(box_x + 5, 11, 1, &label);
     }
 
     canvas.fill_rect(16, 29, WIDTH - 32, 1, true);

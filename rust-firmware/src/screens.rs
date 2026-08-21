@@ -6,6 +6,7 @@ use crate::alarms::{self, AlarmStore, Repeat, StoredAlarm};
 use crate::board::Note4Board;
 use crate::canvas::Canvas;
 use crate::display::Rect;
+use crate::inbox::{InboxItem, InboxStore};
 use crate::rtc::{is_leap, DateTime};
 use crate::storage::PersistedCounters;
 use crate::sync;
@@ -27,6 +28,7 @@ pub fn open_menu(
     wifi_mgr: &mut WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
@@ -45,7 +47,15 @@ pub fn open_menu(
             0,
         ) {
             PickResult::Selected(0) => {
-                sync_now_screen(board, counters, wifi_mgr, alarm_store, todo_store, now);
+                sync_now_screen(
+                    board,
+                    counters,
+                    wifi_mgr,
+                    alarm_store,
+                    todo_store,
+                    inbox_store,
+                    now,
+                );
                 false
             }
             PickResult::Selected(1) => sync_interval_screen(board, counters),
@@ -56,6 +66,7 @@ pub fn open_menu(
                     wifi_mgr,
                     alarm_store,
                     todo_store,
+                    inbox_store,
                     now,
                     ble_control,
                 );
@@ -83,6 +94,7 @@ pub fn open_menu(
                 wifi_mgr,
                 alarm_store,
                 todo_store,
+                inbox_store,
                 now,
                 ble_control,
             );
@@ -139,6 +151,7 @@ pub enum Page {
     Calendar,
     Alarms,
     Todos,
+    Inbox,
 }
 
 /// GO TO navigation bar geometry: a left-hand panel overlaid on the live
@@ -154,11 +167,11 @@ const NAV_BAR_RECT: Rect = Rect {
     width: 176,
     height: 266,
 };
-const NAV_BAR_ROW_H: usize = 37;
-/// Destinations in row order; `selected` indexes straight into this, and
-/// `pick_navigation` maps `Page` onto the first four rows (SETTINGS is
-/// reached by selecting the fifth row, it has no `Page` of its own).
-const NAV_DESTINATIONS: [&str; 5] = ["HOME", "CALENDAR", "ALARMS", "TODOS", "SETTINGS"];
+const NAV_BAR_ROW_H: usize = 33;
+/// Destinations in row order; `selected` indexes straight into this.
+/// Five pages (HOME/CALENDAR/INBOX/ALARMS/TODOS) plus SETTINGS - six rows
+/// at 33px each (33*6=198) stays inside the bar's 266px height.
+const NAV_DESTINATIONS: [&str; 6] = ["HOME", "CALENDAR", "INBOX", "ALARMS", "TODOS", "SETTINGS"];
 
 /// Draws the left navigation bar on top of whatever the canvas currently
 /// holds - it deliberately does NOT clear the screen, so the current page
@@ -220,8 +233,9 @@ fn pick_navigation(board: &mut Note4Board, current: Page) -> Option<usize> {
     let current_index = match current {
         Page::Home => 0,
         Page::Calendar => 1,
-        Page::Alarms => 2,
-        Page::Todos => 3,
+        Page::Inbox => 2,
+        Page::Alarms => 3,
+        Page::Todos => 4,
     };
     let mut selected = current_index;
     let mut needs_redraw = true;
@@ -269,6 +283,7 @@ pub fn open_navigation(
     wifi_mgr: &mut WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
@@ -278,10 +293,11 @@ pub fn open_navigation(
         };
         match selected {
             0 => return,
-            1..=3 => {
+            1..=4 => {
                 let page = match selected {
                     1 => Page::Calendar,
-                    2 => Page::Alarms,
+                    2 => Page::Inbox,
+                    3 => Page::Alarms,
                     _ => Page::Todos,
                 };
                 browse_page(
@@ -291,17 +307,19 @@ pub fn open_navigation(
                     wifi_mgr,
                     alarm_store,
                     todo_store,
+                    inbox_store,
                     now,
                     ble_control,
                 );
                 return;
             }
-            4 => open_menu(
+            5 => open_menu(
                 board,
                 counters,
                 wifi_mgr,
                 alarm_store,
                 todo_store,
+                inbox_store,
                 now,
                 ble_control,
             ),
@@ -320,11 +338,13 @@ fn browse_page(
     wifi_mgr: &mut WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
     let mut alarm_selected = 0usize;
     let mut todo_selected = 0usize;
+    let mut inbox_selected = 0usize;
     // Calendar day cursor - starts on today, moves with UP/DOWN, ENTER
     // opens that day's week view. Only meaningful while `now` is known.
     let mut cal_selected_day: u8 = now.map(|dt| dt.day).unwrap_or(1);
@@ -336,6 +356,7 @@ fn browse_page(
                 Page::Home => {
                     let next_alarm = now.and_then(|dt| next_alarm_label(alarm_store, dt));
                     let todo_summary = todo_summary(todo_store, now);
+                    let unread_inbox = inbox_store.unread_count().unwrap_or(0);
                     let wifi_configured = counters
                         .wifi_creds()
                         .map(|creds| creds.is_some())
@@ -352,6 +373,7 @@ fn browse_page(
                         next_alarm.as_ref().map(|label| label.days_left),
                         todo_summary.pending,
                         todo_summary.due_today,
+                        unread_inbox,
                         wifi_configured,
                         battery_percent,
                         charge,
@@ -400,6 +422,7 @@ fn browse_page(
                 }
                 Page::Alarms => render_alarm_page(board, alarm_store, alarm_selected),
                 Page::Todos => render_todo_page(board, todo_store, todo_selected, now),
+                Page::Inbox => render_inbox_page(board, inbox_store, inbox_selected),
             }
             if first_draw {
                 let _ = board.display.refresh_full();
@@ -420,14 +443,16 @@ fn browse_page(
                 match pick_navigation(board, page) {
                     Some(0) => return,
                     Some(1) => page = Page::Calendar,
-                    Some(2) => page = Page::Alarms,
-                    Some(3) => page = Page::Todos,
-                    Some(4) => open_menu(
+                    Some(2) => page = Page::Inbox,
+                    Some(3) => page = Page::Alarms,
+                    Some(4) => page = Page::Todos,
+                    Some(5) => open_menu(
                         board,
                         counters,
                         wifi_mgr,
                         alarm_store,
                         todo_store,
+                        inbox_store,
                         now,
                         ble_control,
                     ),
@@ -458,6 +483,10 @@ fn browse_page(
                     todo_selected = todo_selected.saturating_sub(1);
                     needs_redraw = true;
                 }
+                Page::Inbox => {
+                    inbox_selected = inbox_selected.saturating_sub(1);
+                    needs_redraw = true;
+                }
                 Page::Calendar => {
                     cal_selected_day = cal_selected_day.saturating_sub(1).max(1);
                     needs_redraw = true;
@@ -477,6 +506,13 @@ fn browse_page(
                         needs_redraw = true;
                     }
                 }
+                Page::Inbox => {
+                    let len = inbox_store.load().map(|v| v.len()).unwrap_or(0);
+                    if len > 0 {
+                        inbox_selected = (inbox_selected + 1).min(len - 1);
+                        needs_redraw = true;
+                    }
+                }
                 Page::Calendar => {
                     if let Some(dt) = now {
                         let dim = days_in_month(dt.year, dt.month);
@@ -491,6 +527,7 @@ fn browse_page(
                     Page::Home => {}
                     Page::Alarms => activate_alarm_row(board, alarm_store, now, alarm_selected),
                     Page::Todos => activate_todo_row(todo_store, todo_selected),
+                    Page::Inbox => open_inbox_item(board, inbox_store, inbox_selected),
                     Page::Calendar => {
                         if let Some(dt) = now {
                             week_view(board, todo_store, dt.year, dt.month, cal_selected_day, now);
@@ -948,6 +985,62 @@ fn cycle_todo_importance(store: &TodoStore, selected: usize) {
     }
 }
 
+fn format_inbox_row(item: &InboxItem) -> String {
+    let mark = if item.read { "• " } else { "○ " };
+    let row = format!("{mark}{}", item.title);
+    row.chars().take(34).collect()
+}
+
+fn render_inbox_page(board: &mut Note4Board, store: &InboxStore, selected: usize) {
+    let items: Vec<String> = store
+        .load()
+        .unwrap_or_default()
+        .iter()
+        .map(format_inbox_row)
+        .collect();
+    let canvas = board.display.canvas_mut();
+    if items.is_empty() {
+        draw_rows(canvas, "INBOX", &["NO MESSAGES".to_string()], selected);
+    } else {
+        draw_rows(canvas, "INBOX", &items, selected);
+    }
+    footer(canvas, "ENTER OPEN   HOLD UP/DOWN PAGE");
+}
+
+/// Opens an inbox item's detail (title + body) and marks it read locally.
+fn open_inbox_item(board: &mut Note4Board, store: &InboxStore, selected: usize) {
+    let list = store.load().unwrap_or_default();
+    let Some(item) = list.get(selected) else {
+        return;
+    };
+    if let Err(err) = store.mark_read(item.id) {
+        log::warn!("Failed to mark inbox item read: {err}");
+    }
+
+    let canvas = board.display.canvas_mut();
+    canvas.clear();
+    header(canvas, "INBOX");
+    let title: String = item.title.chars().take(34).collect();
+    canvas.draw_text_prop(16, 44, 2, &title);
+    let mut y = 84usize;
+    for line in wrap_text_small(&item.body, 368) {
+        if y + 16 > 280 {
+            break;
+        }
+        canvas.draw_text_prop(16, y, 1, &line);
+        y += 18;
+    }
+    footer(canvas, "ENTER / HOLD ENTER CLOSE");
+    let _ = board.display.refresh_full();
+    loop {
+        match poll_nav(board) {
+            Nav::None => {}
+            _ => return,
+        }
+        tick();
+    }
+}
+
 /// Two-stage hour/minute stepper for a new daily alarm - editing repeat
 /// mode or a specific one-shot date is left to the PC tool/server sync
 /// path, not this on-device screen.
@@ -977,6 +1070,7 @@ fn sync_now_screen(
     wifi_mgr: &mut WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     now: Option<&DateTime>,
 ) {
     let Some(now_dt) = now else {
@@ -994,15 +1088,22 @@ fn sync_now_screen(
         wifi_mgr,
         alarm_store,
         todo_store,
+        inbox_store,
         &mut board.rtc,
         now_dt,
     ) {
         Ok(sync::SyncOutcome::Applied {
             alarm_count,
             todo_count,
+            inbox_count,
+            inbox_truncated,
             ..
         }) => {
-            let msg = format!("Alarms: {} Todos: {}", alarm_count, todo_count);
+            let msg = if inbox_truncated {
+                format!("A:{alarm_count} T:{todo_count} IN:{inbox_count}+")
+            } else {
+                format!("A:{alarm_count} T:{todo_count} IN:{inbox_count}")
+            };
             show_message(board, "SYNC OK", &[&msg], std::time::Duration::from_secs(2));
         }
         Err(err) => {
@@ -1031,6 +1132,7 @@ fn ble_pairing_screen(
     wifi_mgr: &mut WifiManager,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
+    inbox_store: &InboxStore,
     now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
@@ -1065,6 +1167,7 @@ fn ble_pairing_screen(
                         wifi_mgr,
                         alarm_store,
                         todo_store,
+                        inbox_store,
                         now,
                     );
                     if let Some(ble) = ble_control.as_ref() {
