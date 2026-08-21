@@ -173,8 +173,7 @@ impl Es8311 {
 
     /// Streams a sine tone straight to the I2S TX channel in small
     /// stack-buffered chunks, so a multi-second tone never needs a single
-    /// large heap allocation. Used as the alarm-ring tone (see
-    /// `main.rs::ring_alarm_until_dismissed`).
+    /// large heap allocation. Used as the alarm-ring tone in `alarms.rs`.
     pub fn play_sine_stereo(
         &mut self,
         freq_hz: f32,

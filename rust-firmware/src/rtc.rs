@@ -203,8 +203,8 @@ impl Pcf8563 {
         Ok(())
     }
 
-    /// Reads AF (ctrl2 bit3) without touching AIE. The main loop polls this
-    /// while awake; deep-sleep boots use the GPIO wake cause instead.
+    /// Reads AF (ctrl2 bit3) without touching AIE. The shared runtime poller
+    /// checks this while awake; deep-sleep boots use the GPIO wake cause.
     pub fn alarm_flag(&mut self) -> Result<bool> {
         let mut ctrl2 = [0u8; 1];
         self.read_regs(0x01, &mut ctrl2)?;

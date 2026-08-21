@@ -521,14 +521,7 @@ fn browse_page(
                     Page::Inbox => open_inbox_item(ctx, live_now.as_ref(), inbox_selected),
                     Page::Calendar => {
                         if let Some(dt) = live_now.as_ref() {
-                            week_view(
-                                ctx.board,
-                                ctx.todo_store,
-                                dt.year,
-                                dt.month,
-                                cal_selected_day,
-                                live_now.as_ref(),
-                            );
+                            week_view(ctx, dt.year, dt.month, cal_selected_day, live_now.as_ref());
                         }
                     }
                 }
@@ -751,15 +744,8 @@ fn wrap_text_prop(text: &str, max_width: usize) -> Vec<String> {
 /// independent of which day (`day`, the cursor position when ENTER was
 /// pressed) the view was opened for. Any button closes it - read-only,
 /// there's nothing further to drill into.
-fn week_view(
-    board: &mut Note4Board,
-    todo_store: &TodoStore,
-    year: u16,
-    month: u8,
-    day: u8,
-    now: Option<&DateTime>,
-) {
-    let todos = todo_store.load().unwrap_or_default();
+fn week_view(ctx: &mut DeviceContext, year: u16, month: u8, day: u8, now: Option<&DateTime>) {
+    let todos = ctx.todo_store.load().unwrap_or_default();
     let start = alarms::days_since_epoch(year, month, day) - weekday_of(year, month, day) as i64;
     let (_, sm, sd) = alarms::date_from_days(start);
     let (_, em, ed) = alarms::date_from_days(start + 6);
@@ -775,7 +761,7 @@ fn week_view(
         )
     };
 
-    let canvas = board.display.canvas_mut();
+    let canvas = ctx.board.display.canvas_mut();
     canvas.clear();
     header(canvas, &title);
 
@@ -868,9 +854,12 @@ fn week_view(
         }
     }
 
-    board.display.refresh_full_best_effort();
+    ctx.board.display.refresh_full_best_effort();
     loop {
-        match poll_nav(board) {
+        if ctx.poll_background(now) {
+            return;
+        }
+        match poll_nav(ctx.board) {
             Nav::None => {}
             _ => return,
         }
@@ -1276,6 +1265,7 @@ fn ble_pairing_screen(
             // would deadlock the control session because leaving this screen
             // tears BLE down.
             let started_at = std::time::Instant::now();
+            let mut last_alarm_poll = std::time::Instant::now();
             loop {
                 let _ = ctx.poll_usb_control(now);
                 if let Some(cmd) = ble_control.as_ref().and_then(|ble| ble.poll_command()) {
@@ -1292,6 +1282,18 @@ fn ble_pairing_screen(
                     || started_at.elapsed() >= std::time::Duration::from_secs(120)
                 {
                     break;
+                }
+                if last_alarm_poll.elapsed() >= std::time::Duration::from_secs(1) {
+                    last_alarm_poll = std::time::Instant::now();
+                    if ctx
+                        .board
+                        .rtc
+                        .read_time()
+                        .ok()
+                        .is_some_and(|fresh| ctx.poll_alarm(&fresh))
+                    {
+                        break;
+                    }
                 }
                 tick();
             }

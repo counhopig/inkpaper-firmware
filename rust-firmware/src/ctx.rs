@@ -33,6 +33,24 @@ pub struct SyncScheduler {
     last_ui_poll: Instant,
 }
 
+/// State needed to safely re-arm the PCF8563's single alarm slot without
+/// immediately retriggering while its hour/minute comparator is still true.
+pub struct AlarmScheduler {
+    programmed_date: Option<(u16, u8, u8)>,
+    rearm_after_minute: Option<u64>,
+}
+
+impl AlarmScheduler {
+    pub fn new(now: Option<&DateTime>, fired_at_boot: bool) -> Self {
+        Self {
+            programmed_date: now.map(|dt| (dt.year, dt.month, dt.day)),
+            rearm_after_minute: fired_at_boot
+                .then(|| now.map(|dt| dt.to_unix() / 60))
+                .flatten(),
+        }
+    }
+}
+
 impl SyncScheduler {
     pub fn new(now: Option<&DateTime>, counters: &PersistedCounters) -> Self {
         let unix = now.map(|dt| dt.to_unix()).unwrap_or(0);
@@ -57,6 +75,7 @@ pub struct DeviceContext<'a> {
     pub inbox_store: &'a InboxStore,
     pub usb_console: &'a mut UsbConsole,
     pub sync_scheduler: SyncScheduler,
+    pub alarm_scheduler: AlarmScheduler,
 }
 
 impl DeviceContext<'_> {
@@ -79,17 +98,78 @@ impl DeviceContext<'_> {
     /// `poll_usb_control` directly because BLE and Wi-Fi share the radio.
     pub fn poll_background(&mut self, now: Option<&DateTime>) -> bool {
         let usb_changed = self.poll_usb_control(now);
-        let sync_changed = if self.sync_scheduler.last_ui_poll.elapsed() >= Duration::from_secs(1) {
-            self.sync_scheduler.last_ui_poll = Instant::now();
-            self.board
-                .rtc
-                .read_time()
-                .ok()
-                .is_some_and(|fresh| self.poll_scheduled_sync(&fresh))
-        } else {
-            false
-        };
-        usb_changed || sync_changed
+        let runtime_changed =
+            if self.sync_scheduler.last_ui_poll.elapsed() >= Duration::from_secs(1) {
+                self.sync_scheduler.last_ui_poll = Instant::now();
+                match self.board.rtc.read_time() {
+                    Ok(fresh) => {
+                        let alarm_changed = self.poll_alarm(&fresh);
+                        let sync_changed = self.poll_scheduled_sync(&fresh);
+                        alarm_changed || sync_changed
+                    }
+                    Err(err) => {
+                        log::warn!("RTC read failed in UI background poll: {err}");
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+        usb_changed || runtime_changed
+    }
+
+    /// Re-arms alarms at minute/date boundaries and handles a live AF flag.
+    /// Returns true when a ringing screen replaced the current UI.
+    pub fn poll_alarm(&mut self, now: &DateTime) -> bool {
+        let current_date = (now.year, now.month, now.day);
+        let current_minute = now.to_unix() / 60;
+        if self
+            .alarm_scheduler
+            .rearm_after_minute
+            .is_some_and(|minute| current_minute > minute)
+        {
+            match self.alarm_store.load().and_then(|list| {
+                crate::alarms::program_hardware_alarm(&mut self.board.rtc, &list, now)
+            }) {
+                Ok(()) => {
+                    self.alarm_scheduler.rearm_after_minute = None;
+                    self.alarm_scheduler.programmed_date = Some(current_date);
+                }
+                Err(err) => log::warn!("Failed to re-arm alarm after ring: {err}"),
+            }
+        }
+        if self.alarm_scheduler.rearm_after_minute.is_none()
+            && self.alarm_scheduler.programmed_date != Some(current_date)
+        {
+            match self.alarm_store.load().and_then(|list| {
+                crate::alarms::program_hardware_alarm(&mut self.board.rtc, &list, now)
+            }) {
+                Ok(()) => self.alarm_scheduler.programmed_date = Some(current_date),
+                Err(err) => {
+                    log::warn!("Failed to re-evaluate hardware alarm at date boundary: {err}")
+                }
+            }
+        }
+        if self.alarm_scheduler.rearm_after_minute.is_some() {
+            return false;
+        }
+        match self.board.rtc.alarm_flag() {
+            Ok(true) => {
+                log::info!("RTC alarm fired while device was awake; ringing");
+                if let Err(err) =
+                    crate::alarms::handle_fired_alarm(self.board, self.alarm_store, Some(now))
+                {
+                    log::error!("Failed to handle live RTC alarm: {err}");
+                }
+                self.alarm_scheduler.rearm_after_minute = Some(current_minute);
+                true
+            }
+            Ok(false) => false,
+            Err(err) => {
+                log::warn!("Failed to read RTC alarm flag: {err}");
+                false
+            }
+        }
     }
 
     /// Runs an urgent/full sync when its wall-clock boundary advances.

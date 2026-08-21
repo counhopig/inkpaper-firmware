@@ -32,8 +32,8 @@ use alarms::AlarmStore;
 use anyhow::Result;
 use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
-use canvas::{Canvas, Rect};
-use ctx::{DeviceContext, SyncScheduler};
+use canvas::Rect;
+use ctx::{AlarmScheduler, DeviceContext, SyncScheduler};
 use esp_idf_svc::systime::EspSystemTime;
 use inbox::InboxStore;
 use rtc::DateTime;
@@ -157,7 +157,7 @@ fn main() -> Result<()> {
     let alarm_fired_at_boot = power::wake_cause() == power::WakeCause::RtcAlarm;
     if alarm_fired_at_boot {
         log::info!("Woke from RTC alarm; ringing");
-        handle_fired_alarm(&mut board, &alarm_store, clock.as_ref())?;
+        alarms::handle_fired_alarm(&mut board, &alarm_store, clock.as_ref())?;
     }
 
     // Keep the PCF8563's single hardware alarm slot pointed at whichever
@@ -272,17 +272,11 @@ fn main() -> Result<()> {
         inbox_store: &inbox_store,
         usb_console: &mut usb_console,
         sync_scheduler: SyncScheduler::new(clock.as_ref(), &counters),
+        alarm_scheduler: AlarmScheduler::new(clock.as_ref(), alarm_fired_at_boot),
     };
 
     let mut status_tick = 0u32;
     let mut clock_tick = 0u32;
-    let mut alarm_programmed_date = clock.map(|dt| (dt.year, dt.month, dt.day));
-    // Re-arming a recurring PCF8563 alarm while its hour/minute comparator is
-    // still true can immediately assert AF again. Wait until the next minute
-    // after every ring before programming the next occurrence.
-    let mut alarm_rearm_after_minute = alarm_fired_at_boot
-        .then(|| clock.map(|dt| dt.to_unix() / 60))
-        .flatten();
     // Cron-style wall-clock alignment: sync decisions fire when the
     // boundary index *advances*, not when a boot-relative timer elapses -
     // so "every 30s" means at :00/:30 of each minute and "every 1h" means
@@ -319,46 +313,8 @@ fn main() -> Result<()> {
             clock_tick = 0;
             match ctx.board.rtc.read_time() {
                 Ok(dt) => {
-                    let current_date = (dt.year, dt.month, dt.day);
-                    let current_minute = dt.to_unix() / 60;
-                    if alarm_rearm_after_minute.is_some_and(|minute| current_minute > minute) {
-                        match ctx.alarm_store.load().and_then(|list| {
-                            alarms::program_hardware_alarm(&mut ctx.board.rtc, &list, &dt)
-                        }) {
-                            Ok(()) => {
-                                alarm_rearm_after_minute = None;
-                                alarm_programmed_date = Some(current_date);
-                            }
-                            Err(err) => log::warn!("Failed to re-arm alarm after ring: {err}"),
-                        }
-                    }
-                    if alarm_rearm_after_minute.is_none()
-                        && alarm_programmed_date != Some(current_date)
-                    {
-                        match ctx.alarm_store.load().and_then(|list| {
-                            alarms::program_hardware_alarm(&mut ctx.board.rtc, &list, &dt)
-                        }) {
-                            Ok(()) => alarm_programmed_date = Some(current_date),
-                            Err(err) => log::warn!(
-                                "Failed to re-evaluate hardware alarm at date boundary: {err}"
-                            ),
-                        }
-                    }
-                    if alarm_rearm_after_minute.is_none() {
-                        match ctx.board.rtc.alarm_flag() {
-                            Ok(true) => {
-                                log::info!("RTC alarm fired while device was awake; ringing");
-                                if let Err(err) =
-                                    handle_fired_alarm(ctx.board, ctx.alarm_store, Some(&dt))
-                                {
-                                    log::error!("Failed to handle live RTC alarm: {err}");
-                                }
-                                alarm_rearm_after_minute = Some(current_minute);
-                                dirty.push(FULL_SCREEN_RECT);
-                            }
-                            Ok(false) => {}
-                            Err(err) => log::warn!("Failed to read RTC alarm flag: {err}"),
-                        }
+                    if ctx.poll_alarm(&dt) {
+                        dirty.push(FULL_SCREEN_RECT);
                     }
                     let changed = clock
                         .as_ref()
@@ -545,74 +501,6 @@ fn report_power_state(board: &mut Note4Board) -> Result<()> {
     Ok(())
 }
 
-/// Safety bound so an unattended/stuck-button alarm can't ring forever and
-/// drain the battery; generous for a bedside alarm.
-const MAX_RING_SECS: u64 = 300;
-
-/// Handles both deep-sleep alarm wake and an AF flag observed while awake.
-/// Re-arming is deliberately left to the caller after the minute changes.
-fn handle_fired_alarm(
-    board: &mut Note4Board,
-    alarm_store: &AlarmStore,
-    now: Option<&DateTime>,
-) -> Result<()> {
-    ring_alarm_until_dismissed(board)?;
-    board.rtc.ack_alarm()?;
-
-    if let Some(now) = now {
-        let mut list = alarm_store.load()?;
-        let before = list.len();
-        list.retain(|alarm| !alarms::is_expired_once(alarm, now));
-        if list.len() != before {
-            alarm_store.save(&list)?;
-        }
-    }
-    Ok(())
-}
-
-/// Draws the alarm screen, then alternates short tone bursts with polling
-/// ENTER, until dismissed or `MAX_RING_SECS` elapses. Blocks the main loop
-/// for the whole ring, so it feeds the watchdog every iteration.
-fn ring_alarm_until_dismissed(board: &mut Note4Board) -> Result<()> {
-    let canvas = board.display.canvas_mut();
-    canvas.clear();
-    // Standard header for consistency; the big ALARM word below carries
-    // the dramatic weight (the header title repeats it deliberately, like
-    // a page whose content states its own subject).
-    ui::header(canvas, "ALARM");
-    let alarm_w = Canvas::text_prop_width("ALARM", 4);
-    canvas.draw_text_prop(200usize.saturating_sub(alarm_w / 2), 92, 4, "ALARM");
-    let hint = "ENTER = DISMISS";
-    let hint_w = Canvas::text_prop_width(hint, 1);
-    canvas.draw_text_prop(200usize.saturating_sub(hint_w / 2), 184, 1, hint);
-    board.display.refresh_full_best_effort();
-
-    let start = EspSystemTime {}.now();
-    loop {
-        watchdog::feed();
-        if let Some(ButtonEvent::Pressed) = board.key_enter.poll() {
-            log::info!("Alarm dismissed");
-            break;
-        }
-        let elapsed = EspSystemTime {}.now().saturating_sub(start);
-        if elapsed >= Duration::from_secs(MAX_RING_SECS) {
-            log::warn!("Alarm ring timed out after {MAX_RING_SECS}s with no dismiss");
-            break;
-        }
-        if let Some(audio) = board.audio.as_mut() {
-            // Keep tone chunks short so the debouncer receives enough polls
-            // while ENTER is held/released. A 300ms blocking tone made a
-            // normal press almost impossible to observe.
-            if let Err(err) = audio.play_sine_stereo(880.0, 0.05, 8000) {
-                log::warn!("Alarm tone playback failed: {err}");
-            }
-        } else {
-            thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
-        }
-    }
-    Ok(())
-}
-
 /// Checks - once per calendar day - whether any `High`-importance todo is
 /// due today and still open, and if so blocks the main loop on a "TODOS
 /// DUE" screen with a short tone burst until ENTER. The reminder date is
@@ -667,7 +555,7 @@ fn maybe_remind_due_todos(
 
 /// Full-screen "TODOS DUE" with up to 7 due items, a short 3-note tone
 /// burst, then a blocking wait for ENTER (or long ENTER) - same shape as
-/// `ring_alarm_until_dismissed`, without the 5-minute timeout since these
+/// the alarm ring screen, without the 5-minute timeout since these
 /// are far less urgent.
 fn remind_due_todos_screen(board: &mut Note4Board, due: &[&Todo]) {
     let canvas = board.display.canvas_mut();

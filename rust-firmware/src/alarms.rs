@@ -5,10 +5,16 @@
 
 use anyhow::{anyhow, Result};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
+use esp_idf_svc::systime::EspSystemTime;
 use serde::{Deserialize, Serialize};
+use std::thread;
 use std::time::Duration;
 
+use crate::board::Note4Board;
+use crate::button::{ButtonEvent, POLL_INTERVAL_MS};
+use crate::canvas::Canvas;
 use crate::rtc::{is_leap, AlarmRegs, DateTime, Pcf8563};
+use crate::{ui, watchdog};
 
 const NAMESPACE: &str = "inkwash_alrm";
 const KEY_ALARMS: &str = "alarms";
@@ -17,6 +23,8 @@ const KEY_DIRTY: &str = "dirty";
 /// Generous headroom over what a few dozen short JSON alarm records need;
 /// NVS blob entries top out around ~4000 bytes on this partition anyway.
 const BLOB_BUF_LEN: usize = 1024;
+/// Safety bound so an unattended/stuck-button alarm cannot ring forever.
+const MAX_RING_SECS: u64 = 300;
 
 /// Recurrence schedule, wire-compatible with the server's
 /// `models::Repeat`. Externally tagged by serde: `"Daily"`, `{"Weekly":
@@ -149,6 +157,63 @@ impl AlarmStore {
             .map(|_| ())
             .map_err(|e| anyhow!("NVS remove({KEY_DIRTY}) failed: {e}"))
     }
+}
+
+/// Handles both deep-sleep alarm wake and an AF flag observed while awake.
+/// Re-arming is deliberately left to the scheduler after the minute changes.
+pub fn handle_fired_alarm(
+    board: &mut Note4Board,
+    alarm_store: &AlarmStore,
+    now: Option<&DateTime>,
+) -> Result<()> {
+    ring_until_dismissed(board)?;
+    board.rtc.ack_alarm()?;
+
+    if let Some(now) = now {
+        let mut list = alarm_store.load()?;
+        let before = list.len();
+        list.retain(|alarm| !is_expired_once(alarm, now));
+        if list.len() != before {
+            alarm_store.save(&list)?;
+        }
+    }
+    Ok(())
+}
+
+/// Draws the alarm screen, then alternates short tone bursts with polling
+/// ENTER until dismissed or the safety timeout elapses.
+fn ring_until_dismissed(board: &mut Note4Board) -> Result<()> {
+    let canvas = board.display.canvas_mut();
+    canvas.clear();
+    ui::header(canvas, "ALARM");
+    let alarm_w = Canvas::text_prop_width("ALARM", 4);
+    canvas.draw_text_prop(200usize.saturating_sub(alarm_w / 2), 92, 4, "ALARM");
+    let hint = "ENTER = DISMISS";
+    let hint_w = Canvas::text_prop_width(hint, 1);
+    canvas.draw_text_prop(200usize.saturating_sub(hint_w / 2), 184, 1, hint);
+    board.display.refresh_full_best_effort();
+
+    let start = EspSystemTime {}.now();
+    loop {
+        watchdog::feed();
+        if let Some(ButtonEvent::Pressed) = board.key_enter.poll() {
+            log::info!("Alarm dismissed");
+            break;
+        }
+        let elapsed = EspSystemTime {}.now().saturating_sub(start);
+        if elapsed >= Duration::from_secs(MAX_RING_SECS) {
+            log::warn!("Alarm ring timed out after {MAX_RING_SECS}s with no dismiss");
+            break;
+        }
+        if let Some(audio) = board.audio.as_mut() {
+            if let Err(err) = audio.play_sine_stereo(880.0, 0.05, 8000) {
+                log::warn!("Alarm tone playback failed: {err}");
+            }
+        } else {
+            thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
+        }
+    }
+    Ok(())
 }
 
 /// Absolute day number (proleptic Gregorian, epoch 1970-01-01) - only used
