@@ -83,7 +83,7 @@ pub fn show_message(board: &mut Note4Board, title: &str, lines: &[&str], pause: 
         canvas.draw_text_prop((400usize.saturating_sub(width)) / 2, y, 2, line);
         y += 38;
     }
-    let _ = board.display.refresh_partial(Rect {
+    board.display.refresh_partial_best_effort(Rect {
         x: 0,
         y: 0,
         width: 400,
@@ -164,10 +164,10 @@ pub fn pick_from_list(
             draw_rows(canvas, title, items, selected);
             footer(canvas, hint);
             if first_draw {
-                let _ = board.display.refresh_full();
+                board.display.refresh_full_best_effort();
                 first_draw = false;
             } else {
-                let _ = board.display.refresh_partial(Rect {
+                board.display.refresh_partial_best_effort(Rect {
                     x: 8,
                     y: 34,
                     width: 384,
@@ -240,10 +240,10 @@ pub fn pick_number(board: &mut Note4Board, title: &str, min: u8, max: u8) -> Opt
             canvas.draw_text_prop(value_x, value_y, 5, &label);
             footer(canvas, "UP/DOWN CHANGE   ENTER OK   HOLD ENTER BACK");
             if first_draw {
-                let _ = board.display.refresh_full();
+                board.display.refresh_full_best_effort();
                 first_draw = false;
             } else {
-                let _ = board.display.refresh_partial(Rect {
+                board.display.refresh_partial_best_effort(Rect {
                     x: 96,
                     y: 78,
                     width: 208,

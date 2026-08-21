@@ -252,7 +252,7 @@ fn pick_navigation(board: &mut Note4Board, current: Page) -> Option<usize> {
         if needs_redraw {
             let canvas = board.display.canvas_mut();
             draw_navigation_bar(canvas, selected);
-            let _ = board.display.refresh_partial(NAV_BAR_RECT);
+            board.display.refresh_partial_best_effort(NAV_BAR_RECT);
             needs_redraw = false;
         }
         match poll_nav(board) {
@@ -322,18 +322,32 @@ fn browse_page(
     now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
+    let mut live_now = now.copied();
+    let mut rtc_poll_ticks = 0u8;
     let mut alarm_selected = 0usize;
     let mut todo_selected = 0usize;
     let mut inbox_selected = 0usize;
     // Calendar day cursor - starts on today, moves with UP/DOWN, ENTER
     // opens that day's week view. Only meaningful while `now` is known.
-    let mut cal_selected_day: u8 = now.map(|dt| dt.day).unwrap_or(1);
+    let mut cal_selected_day: u8 = live_now.map(|dt| dt.day).unwrap_or(1);
     let mut needs_redraw = true;
     let mut first_draw = true;
     loop {
+        if let Some(cmd) = ctx.usb_console.poll_command() {
+            let needs_redraw_after = !matches!(cmd, crate::control::Command::GetStatus);
+            let reply = crate::control::dispatch(ctx, cmd, live_now.as_ref());
+            crate::usb_console::write_reply(&reply);
+            if needs_redraw_after && matches!(reply, crate::control::Reply::Ok) {
+                if let Ok(fresh) = ctx.board.rtc.read_time() {
+                    live_now = Some(fresh);
+                }
+                needs_redraw = true;
+            }
+        }
         if needs_redraw {
             match page {
                 Page::Home => {
+                    let now = live_now.as_ref();
                     let next_alarm = now.and_then(|dt| next_alarm_label(ctx.alarm_store, dt));
                     let todo_summary = todo_summary(ctx.todo_store, now);
                     let unread_inbox = ctx.inbox_store.unread_count().unwrap_or(0);
@@ -362,6 +376,7 @@ fn browse_page(
                     );
                 }
                 Page::Calendar => {
+                    let now = live_now.as_ref();
                     let canvas = ctx.board.display.canvas_mut();
                     canvas.clear();
                     header(canvas, "CALENDAR");
@@ -403,14 +418,16 @@ fn browse_page(
                     );
                 }
                 Page::Alarms => render_alarm_page(ctx.board, ctx.alarm_store, alarm_selected),
-                Page::Todos => render_todo_page(ctx.board, ctx.todo_store, todo_selected, now),
+                Page::Todos => {
+                    render_todo_page(ctx.board, ctx.todo_store, todo_selected, live_now.as_ref())
+                }
                 Page::Inbox => render_inbox_page(ctx.board, ctx.inbox_store, inbox_selected),
             }
             if first_draw {
-                let _ = ctx.board.display.refresh_full();
+                ctx.board.display.refresh_full_best_effort();
                 first_draw = false;
             } else {
-                let _ = ctx.board.display.refresh_partial(Rect {
+                ctx.board.display.refresh_partial_best_effort(Rect {
                     x: 0,
                     y: 0,
                     width: 400,
@@ -428,7 +445,7 @@ fn browse_page(
                     Some(2) => page = Page::Inbox,
                     Some(3) => page = Page::Alarms,
                     Some(4) => page = Page::Todos,
-                    Some(5) => open_menu(ctx, now, ble_control),
+                    Some(5) => open_menu(ctx, live_now.as_ref(), ble_control),
                     Some(_) | None => {}
                 }
                 needs_redraw = true;
@@ -487,7 +504,7 @@ fn browse_page(
                     }
                 }
                 Page::Calendar => {
-                    if let Some(dt) = now {
+                    if let Some(dt) = live_now.as_ref() {
                         let dim = days_in_month(dt.year, dt.month);
                         cal_selected_day = (cal_selected_day + 1).min(dim);
                         needs_redraw = true;
@@ -498,20 +515,23 @@ fn browse_page(
             Nav::Enter => {
                 match page {
                     Page::Home => {}
-                    Page::Alarms => {
-                        activate_alarm_row(ctx.board, ctx.alarm_store, now, alarm_selected)
-                    }
+                    Page::Alarms => activate_alarm_row(
+                        ctx.board,
+                        ctx.alarm_store,
+                        live_now.as_ref(),
+                        alarm_selected,
+                    ),
                     Page::Todos => activate_todo_row(ctx.todo_store, todo_selected),
                     Page::Inbox => open_inbox_item(ctx.board, ctx.inbox_store, inbox_selected),
                     Page::Calendar => {
-                        if let Some(dt) = now {
+                        if let Some(dt) = live_now.as_ref() {
                             week_view(
                                 ctx.board,
                                 ctx.todo_store,
                                 dt.year,
                                 dt.month,
                                 cal_selected_day,
-                                now,
+                                live_now.as_ref(),
                             );
                         }
                     }
@@ -519,6 +539,28 @@ fn browse_page(
                 needs_redraw = true;
             }
             Nav::None => {}
+        }
+        rtc_poll_ticks = rtc_poll_ticks.saturating_add(1);
+        if rtc_poll_ticks >= 50 {
+            rtc_poll_ticks = 0;
+            match ctx.board.rtc.read_time() {
+                Ok(fresh) => {
+                    let visible_time_changed = live_now.as_ref().is_none_or(|old| {
+                        old.minute != fresh.minute
+                            || old.hour != fresh.hour
+                            || old.day != fresh.day
+                            || old.month != fresh.month
+                            || old.year != fresh.year
+                    });
+                    live_now = Some(fresh);
+                    if visible_time_changed
+                        && matches!(page, Page::Home | Page::Calendar | Page::Todos)
+                    {
+                        needs_redraw = true;
+                    }
+                }
+                Err(err) => log::warn!("RTC read failed while browsing: {err}"),
+            }
         }
         tick();
     }
@@ -830,7 +872,7 @@ fn week_view(
         }
     }
 
-    let _ = board.display.refresh_full();
+    board.display.refresh_full_best_effort();
     loop {
         match poll_nav(board) {
             Nav::None => {}
@@ -1110,7 +1152,7 @@ fn open_inbox_item(board: &mut Note4Board, store: &InboxStore, selected: usize) 
         y += 18;
     }
     footer(canvas, "ENTER / HOLD ENTER CLOSE");
-    let _ = board.display.refresh_full();
+    board.display.refresh_full_best_effort();
     loop {
         match poll_nav(board) {
             Nav::None => {}
@@ -1222,7 +1264,7 @@ fn ble_pairing_screen(
             canvas.draw_text_prop(8, 72, 1, "d2c25e50-");
             canvas.draw_text_prop(8, 84, 1, "5e22-48d8...");
             footer(canvas, "HOLD ENTER BACK");
-            let _ = ctx.board.display.refresh_full();
+            ctx.board.display.refresh_full_best_effort();
 
             // This screen owns the main thread while pairing is active, so it
             // must drain BLE commands here. Waiting for the outer Home loop

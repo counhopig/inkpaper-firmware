@@ -90,8 +90,8 @@ impl EpdDisplay {
     }
 
     /// Always refreshes only `rect`, never promotes to a full refresh.
-    /// The home clock ticks every ~1.2s so a periodic full flash every
-    /// few seconds would be very visible; boot and alarm-ring still use
+    /// The RTC is sampled frequently but the visible home clock refreshes
+    /// only when its displayed minute changes; boot and alarm-ring still use
     /// `refresh_full` explicitly. Callers re-render the whole canvas
     /// before refreshing, so the partial rect always shows fresh pixels.
     pub fn refresh_partial(&mut self, rect: Rect) -> Result<()> {
@@ -110,6 +110,27 @@ impl EpdDisplay {
             zectrix_epd_power_off(self.handle)
         });
         refresh.and(power_off)
+    }
+
+    /// UI screens are best-effort callers: a display fault must not silently
+    /// disappear, but it also must not stop buttons, alarms, or the watchdog.
+    pub fn refresh_full_best_effort(&mut self) {
+        if let Err(err) = self.refresh_full() {
+            log::error!("EPD full refresh failed: {err}");
+        }
+    }
+
+    /// Logs a partial-refresh failure and attempts one full refresh using the
+    /// already-rendered canvas. This is the common recovery path for a panel
+    /// that lost partial-update state without turning every UI loop into an
+    /// error-propagation tree.
+    pub fn refresh_partial_best_effort(&mut self, rect: Rect) {
+        if let Err(err) = self.refresh_partial(rect) {
+            log::warn!("EPD partial refresh failed; trying full refresh: {err}");
+            if let Err(full_err) = self.refresh_full() {
+                log::error!("EPD recovery full refresh failed: {full_err}");
+            }
+        }
     }
 }
 

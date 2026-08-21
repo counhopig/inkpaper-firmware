@@ -8,7 +8,7 @@
 //!
 //! The store fields are `&'a` (immutable) because their methods all take
 //! `&self` (the underlying NVS handles have internal mutability); only
-//! `board` and `wifi_mgr` need `&'a mut`. This lets a function read a store
+//! `board`, `wifi_mgr`, and `usb_console` need `&'a mut`. This lets a function read a store
 //! and mutate the board in the same scope without fighting the borrow checker.
 
 use crate::alarms::AlarmStore;
@@ -16,6 +16,7 @@ use crate::board::Note4Board;
 use crate::inbox::InboxStore;
 use crate::storage::PersistedCounters;
 use crate::todos::TodoStore;
+use crate::usb_console::UsbConsole;
 use crate::wifi::WifiManager;
 
 /// All of the firmware's shared, long-lived state, created once in `main()`
@@ -27,4 +28,5 @@ pub struct DeviceContext<'a> {
     pub alarm_store: &'a AlarmStore,
     pub todo_store: &'a TodoStore,
     pub inbox_store: &'a InboxStore,
+    pub usb_console: &'a mut UsbConsole,
 }

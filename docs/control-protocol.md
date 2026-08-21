@@ -258,10 +258,10 @@ notifications are already message-delimited at the link layer).
 
 ### Limitations (same as USB)
 
-- Commands are only dispatched from the Home screen's main loop.
-- While in any menu screen (including the pairing screen), commands queue
-  up in an internal channel but aren't executed until the user backs out
-  to Home.
+- Commands are dispatched from Home, content-page browsing, and the BLE
+  pairing screen. Short modal pickers still own the main task while active;
+  clients should retry after returning to a content page if one of those
+  transient screens delays a reply.
 
 ---
 
@@ -299,21 +299,10 @@ command execution, so a hung sync will eventually reboot the device.
 - Six commands are implemented: `set_wifi`, `set_server`, `sync_now`,
   `get_status`, `clear_alarms`, and `set_timezone`.
 - No rate limiting or command queueing; commands are dispatched as they arrive.
-- **Commands are only polled from the Home screen's main loop.** `UsbConsole`
-  has no dedicated reader thread or queue - the main loop calls
-  `poll_command()` once per 20 ms iteration, which does a non-blocking read
-  of whatever bytes are currently available. Any screen reached via the
-  navigation drawer (`screens::open_navigation` - Calendar/Alarms/Todos/
-  Settings, and everything under Settings: Sync Now/BLE Pairing/Sleep) runs
-  its own nested blocking button-poll loop and never calls `poll_command()`
-  at all. If the device happens to be sitting in one of those screens (e.g.
-  because someone is using it, or because opening the serial port triggered
-  a spurious ENTER - see next point), bytes simply accumulate unread in the
-  USB-Serial-JTAG driver's own buffer (capacity/behavior not verified by
-  this firmware) until the device returns to Home and polling resumes. A PC
-  tool that needs guaranteed responsiveness should treat "no reply within a
-  few seconds" as "device is probably in a menu," not as a transport
-  failure.
+- `UsbConsole` has no dedicated reader task. Home and the long-lived content
+  pages poll it non-blockingly, while short modal pickers can still delay a
+  command until they return. Input lines are capped at 512 bytes so a broken
+  client cannot grow the firmware heap without bound.
 - **Opening the serial port can itself trigger a spurious ENTER press.**
   This board's USB-Serial-JTAG auto-reset circuitry (the same one `espflash`
   uses to enter the bootloader) wires the DTR/RTS control lines to GPIO0 -

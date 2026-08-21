@@ -251,7 +251,7 @@ fn main() -> Result<()> {
                                     &inbox_store,
                                     clock.as_ref(),
                                 );
-                                board.display.refresh_partial(CLOCK_RECT)?;
+                                board.display.refresh_partial_best_effort(CLOCK_RECT);
                                 log::info!("Clock region refreshed after NTP sync");
                             }
                             Err(err) => {
@@ -282,6 +282,7 @@ fn main() -> Result<()> {
         alarm_store: &alarm_store,
         todo_store: &todo_store,
         inbox_store: &inbox_store,
+        usb_console: &mut usb_console,
     };
 
     let mut status_tick = 0u32;
@@ -378,8 +379,8 @@ fn main() -> Result<()> {
         }
 
         // Poll USB console for incoming commands, dispatch them, and send replies.
-        if let Some(cmd) = usb_console.poll_command() {
-            let needs_full_redraw = matches!(cmd, control::Command::SyncNow);
+        if let Some(cmd) = ctx.usb_console.poll_command() {
+            let needs_full_redraw = !matches!(cmd, control::Command::GetStatus);
             let reply = control::dispatch(&mut ctx, cmd, clock.as_ref());
             if needs_full_redraw && matches!(reply, control::Reply::Ok) {
                 dirty.push(FULL_SCREEN_RECT);
@@ -453,10 +454,12 @@ fn main() -> Result<()> {
                 .iter()
                 .any(|rect| rect.width == 400 && rect.height == 300)
             {
-                ctx.board.display.refresh_partial(FULL_SCREEN_RECT)?;
+                ctx.board
+                    .display
+                    .refresh_partial_best_effort(FULL_SCREEN_RECT);
             } else {
                 for rect in &dirty {
-                    ctx.board.display.refresh_partial(*rect)?;
+                    ctx.board.display.refresh_partial_best_effort(*rect);
                 }
             }
             log::info!("Partial display refresh completed");
@@ -606,9 +609,9 @@ fn run_full_sync(ctx: &mut DeviceContext, now: &DateTime) {
                 ctx.inbox_store,
                 Some(now),
             );
-            if let Err(err) = ctx.board.display.refresh_partial(FULL_SCREEN_RECT) {
-                log::warn!("Failed to refresh display after sync: {err}");
-            }
+            ctx.board
+                .display
+                .refresh_partial_best_effort(FULL_SCREEN_RECT);
         }
         Err(err) => log::warn!("Full sync failed: {err}"),
     }
@@ -660,7 +663,7 @@ fn ring_alarm_until_dismissed(board: &mut Note4Board) -> Result<()> {
     let hint = "ENTER = DISMISS";
     let hint_w = Canvas::text_prop_width(hint, 1);
     canvas.draw_text_prop(200usize.saturating_sub(hint_w / 2), 184, 1, hint);
-    let _ = board.display.refresh_full();
+    board.display.refresh_full_best_effort();
 
     let start = EspSystemTime {}.now();
     loop {
@@ -760,7 +763,7 @@ fn remind_due_todos_screen(board: &mut Note4Board, due: &[&Todo]) {
         canvas.draw_text_prop(16, 268, 1, "MORE...");
     }
     canvas.draw_text_prop(16, 284, 1, "ENTER = DISMISS");
-    let _ = board.display.refresh_full();
+    board.display.refresh_full_best_effort();
 
     if let Some(audio) = board.audio.as_mut() {
         for _ in 0..3 {
@@ -831,7 +834,7 @@ fn remind_urgent_screen(board: &mut Note4Board, titles: &[String]) {
         canvas.draw_text_prop(16, 268, 1, "MORE IN INBOX...");
     }
     canvas.draw_text_prop(16, 284, 1, "ENTER = DISMISS");
-    let _ = board.display.refresh_full();
+    board.display.refresh_full_best_effort();
 
     // Persistent tone bursts until dismissed - urgent messages keep beeping,
     // unlike the normal short alert. Crank the DAC volume to max, use a large
