@@ -40,13 +40,12 @@ pub fn render(
     canvas.fill_rect(21, 14, 4, 4, true);
     canvas.draw_text_prop(38, 8, 1, "INKPAPER");
 
-    // Status cluster is right-aligned like every other header, built
-    // from icon glyphs (right to left: battery, wifi) - see `icons.rs`.
-    // Wi-Fi's icon is omitted entirely when not configured (absence is
-    // the "off" signal) rather than drawn in some fainter style: at
-    // this pixel size a hollow/outlined variant was tried and was
-    // visually indistinguishable from the filled one once actually
-    // rendered.
+    // Status cluster is right-aligned like every other header, built from
+    // icon glyphs (right to left: battery, wifi, inbox-badge). Wi-Fi's icon
+    // is omitted entirely when not configured (absence is the "off" signal)
+    // rather than drawn in some fainter style: at this pixel size a
+    // hollow/outlined variant was tried and was visually indistinguishable
+    // from the filled one once actually rendered.
     let percent = battery_percent.unwrap_or(0);
     let battery_icon: &Icon = if charge.charging {
         if percent < 34 {
@@ -72,19 +71,22 @@ pub fn render(
     } else {
         &icons::BATTERY_FULL
     };
-    // Status cluster right-aligned to the header rule below (its right edge
-    // = x=384, the line's own right edge), not to the canvas edge -
-    // pushing the icons into the margin leaves them visually orphaned
-    // against the divider that anchors everything below.
+    // Right-anchor the battery to the header rule (its right edge =
+    // x=384), then lay out each preceding element to its left with a fixed
+    // 8px gutter, so the cluster never overlaps: battery → wifi → badge.
+    const CLUSTER_GAP: usize = 8;
     let battery_x = WIDTH.saturating_sub(battery_icon.width as usize + 16);
     icons::draw_icon(canvas, battery_x, 7, battery_icon);
+    let mut cursor_x = battery_x;
     if wifi_configured {
-        let wifi_x = battery_x.saturating_sub(8 + icons::WIFI.width as usize);
+        cursor_x = cursor_x.saturating_sub(CLUSTER_GAP + icons::WIFI.width as usize);
         let wifi_y = 7 + battery_icon.rows.len() - icons::WIFI.rows.len();
-        icons::draw_icon(canvas, wifi_x, wifi_y, &icons::WIFI);
+        icons::draw_icon(canvas, cursor_x, wifi_y, &icons::WIFI);
     }
     // Unread-inbox badge: a small boxed count in the status cluster so new
     // notifications are visible at a glance without opening the INBOX page.
+    // It sits left of whichever element was drawn last, reusing the same
+    // gutter, so it can't collide with the wifi glyph.
     if unread_inbox > 0 {
         let label = if unread_inbox > 99 {
             "99+".to_string()
@@ -92,10 +94,11 @@ pub fn render(
             unread_inbox.to_string()
         };
         let label_w = Canvas::text_prop_width(&label, 1);
-        let box_w = label_w + 10;
-        let box_x = battery_x.saturating_sub(8 + box_w);
-        canvas.stroke_rect(box_x, 7, box_w, 15, 2);
-        canvas.draw_text_prop(box_x + 5, 11, 1, &label);
+        let box_w = label_w + 12;
+        let box_h = 17usize;
+        let box_x = cursor_x.saturating_sub(CLUSTER_GAP + box_w);
+        canvas.stroke_rect(box_x, 6, box_w, box_h, 2);
+        canvas.draw_text_prop(box_x + 6, 11, 1, &label);
     }
 
     canvas.fill_rect(16, 29, WIDTH - 32, 1, true);

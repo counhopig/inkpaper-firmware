@@ -90,6 +90,7 @@ fn main() {
         Some(0),
         3,
         1,
+        3,
         true,
         Some(85),
         full_battery(),
@@ -104,6 +105,7 @@ fn main() {
         None,
         None,
         None,
+        0,
         0,
         0,
         false,
@@ -126,6 +128,7 @@ fn main() {
         Some(12),
         1,
         0,
+        7,
         true,
         Some(45),
         board::ChargeSnapshot {
@@ -191,6 +194,7 @@ fn main() {
         Some(0),
         3,
         1,
+        0,
         true,
         Some(85),
         full_battery(),
@@ -198,12 +202,12 @@ fn main() {
     c.fill_rect(16, 34, 176, 250, false);
     c.draw_text_prop(24, 42, 1, "GO TO");
     c.fill_rect(24, 58, 160, 1, true);
-    let dests = ["HOME", "CALENDAR", "ALARMS", "TODOS", "SETTINGS"];
+    let dests = ["HOME", "CALENDAR", "INBOX", "ALARMS", "TODOS", "SETTINGS"];
     for (i, d) in dests.iter().enumerate() {
-        let y = 64 + i * 37;
-        if i == 1 {
-            c.stroke_rect(22, y, 164, 35, 2);
-            c.fill_rect(22, y, 5, 35, true);
+        let y = 64 + i * 33;
+        if i == 2 {
+            c.stroke_rect(22, y, 164, 31, 2);
+            c.fill_rect(22, y, 5, 31, true);
         }
         c.draw_text_prop(30, y + 10, 1, d);
     }
@@ -404,4 +408,40 @@ fn main() {
         c.draw_text_prop(50, y + 10, 1, r);
     }
     save("todos.png", &c);
+
+    // INBOX list page (mirrors screens::render_inbox_page + the home badge).
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "INBOX");
+    let inbox_rows = [
+        "○ Build failed",
+        "○ Deploy complete",
+        "○ Team Standup",
+        "• Weekly digest",
+    ];
+    for (i, r) in inbox_rows.iter().enumerate() {
+        let y = 39 + i * 37;
+        if i == 0 {
+            c.stroke_rect(16, y, 368, 35, 2);
+            c.fill_rect(16, y, 5, 35, true);
+        }
+        c.draw_text_prop(50, y + 10, 1, r);
+    }
+    save("inbox.png", &c);
+
+    // INBOX item detail with wrapped body.
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "INBOX");
+    c.draw_text_prop(16, 44, 2, "Build failed");
+    let body = "main / test-linux — the integration suite timed out after 45 minutes. Check the runner logs for the exact failing test.";
+    let mut yy = 84usize;
+    for line in wrap_text_small(body, 368) {
+        if yy + 16 > 280 {
+            break;
+        }
+        c.draw_text_prop(16, yy, 1, &line);
+        yy += 18;
+    }
+    save("inbox-detail.png", &c);
 }
