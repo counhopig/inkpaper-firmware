@@ -1166,8 +1166,15 @@ fn add_alarm_screen(
 ) -> Option<StoredAlarm> {
     let hour = pick_number(ctx, now, "NEW ALARM - HOUR", 0, 23)?;
     let minute = pick_number(ctx, now, "NEW ALARM - MINUTE", 0, 59)?;
+    let id = match alarms::next_id(existing) {
+        Some(id) => id,
+        None => {
+            log::warn!("Cannot add alarm: all 256 alarm ids are in use");
+            return None;
+        }
+    };
     Some(StoredAlarm {
-        id: alarms::next_id(existing),
+        id,
         hour,
         minute,
         repeat: Repeat::Daily,
@@ -1330,14 +1337,16 @@ pub fn next_alarm_label(store: &AlarmStore, now: &DateTime) -> Option<NextAlarmL
         let (date, days_left) = match &alarm.repeat {
             Repeat::Daily => (None, 0),
             Repeat::Weekly { .. } => {
-                let (year, month, day, _) = alarms::next_occurrence_date(&alarm.repeat, now);
+                let (year, month, day, _) =
+                    alarms::next_occurrence_date(&alarm.repeat, alarm.hour, alarm.minute, now);
                 (
                     Some(format!("{:02}/{:02}", month, day)),
                     alarms::days_until(year, month, day, now),
                 )
             }
             Repeat::Monthly { .. } => {
-                let (year, month, day, _) = alarms::next_occurrence_date(&alarm.repeat, now);
+                let (year, month, day, _) =
+                    alarms::next_occurrence_date(&alarm.repeat, alarm.hour, alarm.minute, now);
                 (
                     Some(format!("{:02}/{:02}", month, day)),
                     alarms::days_until(year, month, day, now),

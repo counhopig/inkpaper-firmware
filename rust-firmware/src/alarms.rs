@@ -209,13 +209,22 @@ fn weekday_from_days(days: i64) -> u8 {
 /// The next calendar date (year, month, day, weekday) that `repeat` covers,
 /// at or after `now`'s date. Non-empty schedules always match within ~62
 /// days, so the scan is bounded and the fallback is unreachable in practice.
-pub(crate) fn next_occurrence_date(repeat: &Repeat, now: &DateTime) -> (u16, u8, u8, u8) {
+pub(crate) fn next_occurrence_date(
+    repeat: &Repeat,
+    hour: u8,
+    minute: u8,
+    now: &DateTime,
+) -> (u16, u8, u8, u8) {
     let now_days = days_since_epoch(now.year, now.month, now.day);
+    let occurrence_minutes = hour as i64 * 60 + minute as i64;
+    let now_minutes = now.hour as i64 * 60 + now.minute as i64;
     for offset in 0..370 {
         let days = now_days + offset;
         let (year, month, day) = date_from_days(days);
         let weekday = weekday_from_days(days);
-        if repeat.fires_on(year, month, day, weekday) {
+        if repeat.fires_on(year, month, day, weekday)
+            && !(offset == 0 && occurrence_minutes <= now_minutes)
+        {
             return (year, month, day, weekday);
         }
     }
@@ -275,10 +284,10 @@ fn minutes_until(alarm: &StoredAlarm, now: &DateTime) -> i64 {
     }
 }
 
-/// Next unused id, so callers adding an alarm don't have to track a counter
-/// themselves - just `id: next_id(&alarms)`.
-pub fn next_id(alarms: &[StoredAlarm]) -> u8 {
-    alarms.iter().map(|a| a.id).max().map_or(0, |m| m + 1)
+/// First unused wire-compatible id. Searching gaps avoids overflow at 255 and
+/// prevents the duplicate id that a wrapping `max + 1` would create.
+pub fn next_id(alarms: &[StoredAlarm]) -> Option<u8> {
+    (u8::MIN..=u8::MAX).find(|candidate| !alarms.iter().any(|a| a.id == *candidate))
 }
 
 /// True for a `Once` alarm whose date has already passed relative to `now`
@@ -286,7 +295,8 @@ pub fn next_id(alarms: &[StoredAlarm]) -> u8 {
 ///   store so it doesn't linger and confuse `next_due` forever. Daily alarms
 ///   recur on their own and are never "expired".
 pub fn is_expired_once(alarm: &StoredAlarm, now: &DateTime) -> bool {
-    matches!(alarm.repeat, Repeat::Once { .. }) && minutes_until(alarm, now) == i64::MAX
+    matches!(alarm.repeat, Repeat::Once { .. })
+        && matches!(minutes_until(alarm, now), i64::MAX | ..=0)
 }
 
 /// Picks the chronologically nearest enabled alarm relative to `now`.
@@ -353,12 +363,14 @@ pub fn program_hardware_alarm(
                     // next covered weekday; every ring is re-programmed by
                     // the ack-and-rearm flow, so it can't keep firing on
                     // later weeks that don't contain a nearer alarm.
-                    let (_, _, _, dow) = next_occurrence_date(&alarm.repeat, now);
+                    let (_, _, _, dow) =
+                        next_occurrence_date(&alarm.repeat, alarm.hour, alarm.minute, now);
                     day = None;
                     weekday = Some(dow);
                 }
                 Repeat::Monthly { .. } => {
-                    let (_, _, day_of_month, _) = next_occurrence_date(&alarm.repeat, now);
+                    let (_, _, day_of_month, _) =
+                        next_occurrence_date(&alarm.repeat, alarm.hour, alarm.minute, now);
                     day = Some(day_of_month);
                     weekday = None;
                 }

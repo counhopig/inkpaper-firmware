@@ -203,11 +203,8 @@ impl Pcf8563 {
         Ok(())
     }
 
-    /// Reads AF (ctrl2 bit3) without touching AIE, so a still-armed daily
-    /// alarm keeps firing on subsequent days. Not called anywhere yet -
-    /// `power::wake_cause()` is the authoritative "did the alarm fire"
-    /// signal for `main.rs`; kept for a future status/debug screen.
-    #[allow(dead_code)]
+    /// Reads AF (ctrl2 bit3) without touching AIE. The main loop polls this
+    /// while awake; deep-sleep boots use the GPIO wake cause instead.
     pub fn alarm_flag(&mut self) -> Result<bool> {
         let mut ctrl2 = [0u8; 1];
         self.read_regs(0x01, &mut ctrl2)?;

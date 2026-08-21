@@ -154,24 +154,10 @@ fn main() -> Result<()> {
     // screen. `power::wake_cause()` reads `esp_sleep_get_wakeup_cause`
     // again (harmless, not a consuming read); unlike the raw cause logged
     // above, this distinguishes ENTER-wake from alarm-wake.
-    if power::wake_cause() == power::WakeCause::RtcAlarm {
+    let alarm_fired_at_boot = power::wake_cause() == power::WakeCause::RtcAlarm;
+    if alarm_fired_at_boot {
         log::info!("Woke from RTC alarm; ringing");
-        ring_alarm_until_dismissed(&mut board)?;
-        if let Err(err) = board.rtc.ack_alarm() {
-            log::warn!("PCF8563 ack_alarm failed: {err}");
-        }
-        // A fired one-shot alarm is spent; drop it so it doesn't linger in
-        // the store and confuse `alarms::next_due` on a future boot. Daily
-        // alarms recur on their own and don't need this.
-        if let (Ok(mut list), Some(dt)) = (alarm_store.load(), clock.as_ref()) {
-            let before = list.len();
-            list.retain(|a| !alarms::is_expired_once(a, dt));
-            if list.len() != before {
-                if let Err(err) = alarm_store.save(&list) {
-                    log::warn!("Failed to save alarms after dropping fired one-shot: {err}");
-                }
-            }
-        }
+        handle_fired_alarm(&mut board, &alarm_store, clock.as_ref())?;
     }
 
     // Keep the PCF8563's single hardware alarm slot pointed at whichever
@@ -179,14 +165,16 @@ fn main() -> Result<()> {
     // after a ring+ack above, or just because nothing armed it yet this
     // session (the RTC keeps its own alarm config across deep sleep, but a
     // fresh flash or an edit made while the device was off both need this).
-    if let Some(dt) = clock.as_ref() {
-        match alarm_store.load() {
-            Ok(list) => {
-                if let Err(err) = alarms::program_hardware_alarm(&mut board.rtc, &list, dt) {
-                    log::warn!("Failed to program hardware alarm: {err}");
+    if !alarm_fired_at_boot {
+        if let Some(dt) = clock.as_ref() {
+            match alarm_store.load() {
+                Ok(list) => {
+                    if let Err(err) = alarms::program_hardware_alarm(&mut board.rtc, &list, dt) {
+                        log::warn!("Failed to program hardware alarm: {err}");
+                    }
                 }
+                Err(err) => log::warn!("Failed to load alarms: {err}"),
             }
-            Err(err) => log::warn!("Failed to load alarms: {err}"),
         }
     }
 
@@ -288,6 +276,12 @@ fn main() -> Result<()> {
     let mut status_tick = 0u32;
     let mut clock_tick = 0u32;
     let mut alarm_programmed_date = clock.map(|dt| (dt.year, dt.month, dt.day));
+    // Re-arming a recurring PCF8563 alarm while its hour/minute comparator is
+    // still true can immediately assert AF again. Wait until the next minute
+    // after every ring before programming the next occurrence.
+    let mut alarm_rearm_after_minute = alarm_fired_at_boot
+        .then(|| clock.map(|dt| dt.to_unix() / 60))
+        .flatten();
     // Cron-style wall-clock alignment: sync decisions fire when the
     // boundary index *advances*, not when a boot-relative timer elapses -
     // so "every 30s" means at :00/:30 of each minute and "every 1h" means
@@ -330,7 +324,21 @@ fn main() -> Result<()> {
             match ctx.board.rtc.read_time() {
                 Ok(dt) => {
                     let current_date = (dt.year, dt.month, dt.day);
-                    if alarm_programmed_date != Some(current_date) {
+                    let current_minute = dt.to_unix() / 60;
+                    if alarm_rearm_after_minute.is_some_and(|minute| current_minute > minute) {
+                        match ctx.alarm_store.load().and_then(|list| {
+                            alarms::program_hardware_alarm(&mut ctx.board.rtc, &list, &dt)
+                        }) {
+                            Ok(()) => {
+                                alarm_rearm_after_minute = None;
+                                alarm_programmed_date = Some(current_date);
+                            }
+                            Err(err) => log::warn!("Failed to re-arm alarm after ring: {err}"),
+                        }
+                    }
+                    if alarm_rearm_after_minute.is_none()
+                        && alarm_programmed_date != Some(current_date)
+                    {
                         match ctx.alarm_store.load().and_then(|list| {
                             alarms::program_hardware_alarm(&mut ctx.board.rtc, &list, &dt)
                         }) {
@@ -338,6 +346,22 @@ fn main() -> Result<()> {
                             Err(err) => log::warn!(
                                 "Failed to re-evaluate hardware alarm at date boundary: {err}"
                             ),
+                        }
+                    }
+                    if alarm_rearm_after_minute.is_none() {
+                        match ctx.board.rtc.alarm_flag() {
+                            Ok(true) => {
+                                log::info!("RTC alarm fired while device was awake; ringing");
+                                if let Err(err) =
+                                    handle_fired_alarm(ctx.board, ctx.alarm_store, Some(&dt))
+                                {
+                                    log::error!("Failed to handle live RTC alarm: {err}");
+                                }
+                                alarm_rearm_after_minute = Some(current_minute);
+                                dirty.push(FULL_SCREEN_RECT);
+                            }
+                            Ok(false) => {}
+                            Err(err) => log::warn!("Failed to read RTC alarm flag: {err}"),
                         }
                     }
                     let changed = clock
@@ -642,6 +666,27 @@ fn report_power_state(board: &mut Note4Board) -> Result<()> {
 /// Safety bound so an unattended/stuck-button alarm can't ring forever and
 /// drain the battery; generous for a bedside alarm.
 const MAX_RING_SECS: u64 = 300;
+
+/// Handles both deep-sleep alarm wake and an AF flag observed while awake.
+/// Re-arming is deliberately left to the caller after the minute changes.
+fn handle_fired_alarm(
+    board: &mut Note4Board,
+    alarm_store: &AlarmStore,
+    now: Option<&DateTime>,
+) -> Result<()> {
+    ring_alarm_until_dismissed(board)?;
+    board.rtc.ack_alarm()?;
+
+    if let Some(now) = now {
+        let mut list = alarm_store.load()?;
+        let before = list.len();
+        list.retain(|alarm| !alarms::is_expired_once(alarm, now));
+        if list.len() != before {
+            alarm_store.save(&list)?;
+        }
+    }
+    Ok(())
+}
 
 /// Draws the alarm screen, then alternates short tone bursts with polling
 /// ENTER, until dismissed or `MAX_RING_SECS` elapses. Blocks the main loop
