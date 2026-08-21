@@ -91,7 +91,13 @@ pub fn open_menu(
                     &["GOING TO SLEEP"],
                     std::time::Duration::from_millis(500),
                 );
-                crate::power::enter_deep_sleep_with_wakeups(None);
+                let maintenance_wake = now.and_then(|dt| {
+                    ctx.alarm_store
+                        .load()
+                        .ok()
+                        .and_then(|alarms| alarms::maintenance_wakeup_delay(&alarms, dt))
+                });
+                crate::power::enter_deep_sleep_with_wakeups(maintenance_wake);
             }
             PickResult::Cancelled => return,
             PickResult::OpenNav => true,
@@ -917,6 +923,7 @@ fn activate_alarm_row(
     selected: usize,
 ) {
     let mut list = store.load().unwrap_or_default();
+    let mut toggled_id = None;
     if selected >= list.len() {
         if let Some(alarm) = add_alarm_screen(board, &list) {
             list.push(alarm);
@@ -925,12 +932,16 @@ fn activate_alarm_row(
         }
     } else {
         list[selected].enabled = !list[selected].enabled;
-        if let Err(err) = store.mark_dirty(list[selected].id) {
-            log::warn!("Failed to mark alarm dirty: {err}");
-        }
+        toggled_id = Some(list[selected].id);
     }
     if let Err(err) = store.save(&list) {
         log::warn!("Failed to save alarms: {err}");
+        return;
+    }
+    if let Some(id) = toggled_id {
+        if let Err(err) = store.mark_dirty(id) {
+            log::warn!("Alarm saved but failed to mark it dirty: {err}");
+        }
     }
     if let Some(dt) = now {
         if let Err(err) = alarms::program_hardware_alarm(&mut board.rtc, &list, dt) {
@@ -998,11 +1009,13 @@ fn activate_todo_row(store: &TodoStore, selected: usize) {
         return;
     };
     todo.done = !todo.done;
-    if let Err(err) = store.mark_dirty(todo.id) {
-        log::warn!("Failed to mark todo dirty: {err}");
-    }
+    let id = todo.id;
     if let Err(err) = store.save(&list) {
         log::warn!("Failed to save todos: {err}");
+        return;
+    }
+    if let Err(err) = store.mark_dirty(id) {
+        log::warn!("Todo saved but failed to mark it dirty: {err}");
     }
 }
 
@@ -1020,11 +1033,13 @@ fn cycle_todo_importance(store: &TodoStore, selected: usize) {
         crate::todos::Importance::High => crate::todos::Importance::Low,
     };
     log::info!("Todo id={} importance now {:?}", todo.id, todo.importance);
-    if let Err(err) = store.mark_dirty(todo.id) {
-        log::warn!("Failed to mark todo dirty: {err}");
-    }
+    let id = todo.id;
     if let Err(err) = store.save(&list) {
         log::warn!("Failed to save todos: {err}");
+        return;
+    }
+    if let Err(err) = store.mark_dirty(id) {
+        log::warn!("Todo saved but failed to mark it dirty: {err}");
     }
 }
 

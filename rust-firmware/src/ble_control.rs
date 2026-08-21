@@ -84,9 +84,12 @@ impl BleControl {
         write_char.lock().on_write(move |args| {
             match String::from_utf8(args.recv_data().to_vec()) {
                 Ok(line) => {
-                    // Ignore send errors (channel full or receiver dropped) -
-                    // there's nowhere to report them from this callback.
-                    let _ = tx_for_callback.send(line);
+                    // Never block the NimBLE host task. A full queue means the
+                    // main loop is busy; dropping one command is recoverable,
+                    // wedging the radio callback is not.
+                    if let Err(err) = tx_for_callback.try_send(line) {
+                        log::warn!("BLE: command queue unavailable: {err}");
+                    }
                 }
                 Err(_) => log::warn!("BLE: received non-UTF-8 command data"),
             }

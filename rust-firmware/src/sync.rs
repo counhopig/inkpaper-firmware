@@ -13,6 +13,7 @@ use embedded_svc::http::Method;
 use embedded_svc::utils::io;
 use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::alarms::{self, AlarmStore, StoredAlarm};
 use crate::inbox::{InboxItem, InboxStore};
@@ -55,6 +56,100 @@ struct SyncResponse {
     inbox_read_acked: Vec<u64>,
     #[serde(default)]
     inbox_truncated: bool,
+}
+
+/// Rejects malformed or internally inconsistent server state before any NVS
+/// blob is replaced. Wire DTOs deliberately use plain integers for protocol
+/// compatibility; the firmware must establish their invariants at this
+/// boundary instead of letting invalid dates become array indices or RTC BCD.
+fn validate_sync_response(response: &SyncResponse) -> Result<()> {
+    let mut alarm_ids = HashSet::new();
+    for alarm in &response.alarms {
+        if !alarm_ids.insert(alarm.id) {
+            return Err(anyhow!("duplicate alarm id {}", alarm.id));
+        }
+        if alarm.hour > 23 || alarm.minute > 59 {
+            return Err(anyhow!(
+                "alarm {} has invalid time {:02}:{:02}",
+                alarm.id,
+                alarm.hour,
+                alarm.minute
+            ));
+        }
+        validate_repeat(&alarm.repeat)
+            .map_err(|err| anyhow!("alarm {} has invalid repeat: {err}", alarm.id))?;
+    }
+
+    let mut todo_ids = HashSet::new();
+    for todo in &response.todos {
+        if !todo_ids.insert(todo.id) {
+            return Err(anyhow!("duplicate todo id {}", todo.id));
+        }
+        if let Some(due) = todo.due_date {
+            validate_date(due.year, due.month, due.day)
+                .map_err(|err| anyhow!("todo {} has invalid due date: {err}", todo.id))?;
+        }
+        if let Some(repeat) = &todo.repeat {
+            if matches!(repeat, alarms::Repeat::Once { .. }) {
+                return Err(anyhow!("todo {} uses unsupported Once repeat", todo.id));
+            }
+            validate_repeat(repeat)
+                .map_err(|err| anyhow!("todo {} has invalid repeat: {err}", todo.id))?;
+        }
+    }
+
+    let mut inbox_ids = HashSet::new();
+    for item in &response.inbox {
+        if !inbox_ids.insert(item.id) {
+            return Err(anyhow!("duplicate inbox id {}", item.id));
+        }
+    }
+
+    // Preflight the two fixed-size stores before writing either one. Without
+    // this, an oversized todo response could replace alarms and then fail,
+    // leaving a mixed-generation snapshot behind.
+    if serde_json::to_vec(&response.alarms)?.len() > 1024 {
+        return Err(anyhow!("alarm list exceeds device storage capacity"));
+    }
+    if serde_json::to_vec(&response.todos)?.len() > 2048 {
+        return Err(anyhow!("todo list exceeds device storage capacity"));
+    }
+    Ok(())
+}
+
+fn validate_repeat(repeat: &alarms::Repeat) -> Result<()> {
+    match repeat {
+        alarms::Repeat::Daily => Ok(()),
+        alarms::Repeat::Weekly { days } => {
+            if days.is_empty() || days.iter().any(|day| *day > 6) {
+                return Err(anyhow!("weekly days must be non-empty and within 0..=6"));
+            }
+            Ok(())
+        }
+        alarms::Repeat::Monthly { days } => {
+            if days.is_empty() || days.iter().any(|day| !(1..=31).contains(day)) {
+                return Err(anyhow!("monthly days must be non-empty and within 1..=31"));
+            }
+            Ok(())
+        }
+        alarms::Repeat::Once { year, month, day } => validate_date(*year, *month, *day),
+    }
+}
+
+fn validate_date(year: u16, month: u8, day: u8) -> Result<()> {
+    if !(2000..=2099).contains(&year) || !(1..=12).contains(&month) {
+        return Err(anyhow!("date must be within 2000-01-01..=2099-12-31"));
+    }
+    let days = match month {
+        2 if crate::rtc::is_leap(year as i64) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=days).contains(&day) {
+        return Err(anyhow!("day {day} is invalid for {year:04}-{month:02}"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -195,6 +290,7 @@ pub fn fetch_and_apply(
 
     let parsed: SyncResponse = serde_json::from_slice(body)
         .map_err(|e| anyhow!("sync response JSON decode failed: {e}"))?;
+    validate_sync_response(&parsed).map_err(|e| anyhow!("sync response validation failed: {e}"))?;
 
     alarm_store
         .save(&parsed.alarms)
@@ -211,15 +307,17 @@ pub fn fetch_and_apply(
     // The merged server state now reflects everything we uploaded, so the
     // pending local changes are spent. Cleared only here, after a
     // successful round-trip - a failed sync keeps them for the retry.
-    if let Err(err) = alarm_store.clear_dirty() {
-        log::warn!("Failed to clear alarm dirty set: {err}");
-    }
-    if let Err(err) = todo_store.clear_dirty() {
-        log::warn!("Failed to clear todo dirty set: {err}");
-    }
-    if let Err(err) = alarms::program_hardware_alarm(rtc, &parsed.alarms, now) {
-        log::warn!("Failed to reprogram hardware alarm after sync: {err}");
-    }
+    // The hardware alarm is part of the committed device state, not an
+    // optional side effect. Do not acknowledge local mutations when the RTC
+    // could not be brought in line with the newly stored alarm list.
+    alarms::program_hardware_alarm(rtc, &parsed.alarms, now)
+        .map_err(|e| anyhow!("failed to reprogram hardware alarm after sync: {e}"))?;
+    alarm_store
+        .clear_dirty()
+        .map_err(|e| anyhow!("failed to clear alarm dirty set: {e}"))?;
+    todo_store
+        .clear_dirty()
+        .map_err(|e| anyhow!("failed to clear todo dirty set: {e}"))?;
 
     log::info!(
         "Sync applied: {} alarms, {} todos, {} inbox (truncated={})",

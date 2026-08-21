@@ -31,12 +31,14 @@ const COMMAND_PREFIX: &str = ">>IW ";
 /// Prefix for outgoing replies, so the PC tool can distinguish control
 /// responses from ordinary log output.
 const REPLY_PREFIX: &str = "<<IW ";
+const MAX_COMMAND_LINE_BYTES: usize = 512;
 
 /// Reader state. USB Serial/JTAG stdin is non-blocking, so the main loop can
 /// drain it directly without a second FreeRTOS task competing with Wi-Fi on
 /// Core 0.
 pub struct UsbConsole {
     line_buf: Vec<u8>,
+    discarding_oversized_line: bool,
     /// Commands already parsed out of a previous read but not yet returned
     /// to the caller. A single 128-byte read can contain more than one
     /// complete `>>IW ...\n` line; every one of them is parsed here so none
@@ -48,6 +50,7 @@ impl UsbConsole {
     pub fn start() -> Self {
         Self {
             line_buf: Vec::new(),
+            discarding_oversized_line: false,
             pending: VecDeque::new(),
         }
     }
@@ -69,6 +72,11 @@ impl UsbConsole {
                 // would silently drop whatever came after the first one.
                 for &byte in &chunk[..n] {
                     if byte == b'\n' {
+                        if self.discarding_oversized_line {
+                            self.discarding_oversized_line = false;
+                            self.line_buf.clear();
+                            continue;
+                        }
                         let line = String::from_utf8_lossy(&self.line_buf)
                             .trim_end_matches('\r')
                             .to_string();
@@ -81,6 +89,14 @@ impl UsbConsole {
                                 }
                             }
                         }
+                    } else if self.discarding_oversized_line {
+                        continue;
+                    } else if self.line_buf.len() >= MAX_COMMAND_LINE_BYTES {
+                        log::warn!(
+                            "USB console: command line exceeds {MAX_COMMAND_LINE_BYTES} bytes; discarding"
+                        );
+                        self.line_buf.clear();
+                        self.discarding_oversized_line = true;
                     } else {
                         self.line_buf.push(byte);
                     }

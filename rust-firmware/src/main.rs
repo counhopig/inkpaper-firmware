@@ -286,6 +286,7 @@ fn main() -> Result<()> {
 
     let mut status_tick = 0u32;
     let mut clock_tick = 0u32;
+    let mut alarm_programmed_date = clock.map(|dt| (dt.year, dt.month, dt.day));
     // Cron-style wall-clock alignment: sync decisions fire when the
     // boundary index *advances*, not when a boot-relative timer elapses -
     // so "every 30s" means at :00/:30 of each minute and "every 1h" means
@@ -327,12 +328,25 @@ fn main() -> Result<()> {
             clock_tick = 0;
             match ctx.board.rtc.read_time() {
                 Ok(dt) => {
+                    let current_date = (dt.year, dt.month, dt.day);
+                    if alarm_programmed_date != Some(current_date) {
+                        match ctx.alarm_store.load().and_then(|list| {
+                            alarms::program_hardware_alarm(&mut ctx.board.rtc, &list, &dt)
+                        }) {
+                            Ok(()) => alarm_programmed_date = Some(current_date),
+                            Err(err) => log::warn!(
+                                "Failed to re-evaluate hardware alarm at date boundary: {err}"
+                            ),
+                        }
+                    }
                     let changed = clock
                         .as_ref()
                         .map(|prev| {
-                            prev.second != dt.second
-                                || prev.minute != dt.minute
+                            prev.minute != dt.minute
                                 || prev.hour != dt.hour
+                                || prev.day != dt.day
+                                || prev.month != dt.month
+                                || prev.year != dt.year
                         })
                         .unwrap_or(true);
                     if changed {

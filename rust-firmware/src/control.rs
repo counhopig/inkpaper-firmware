@@ -264,15 +264,27 @@ pub fn dispatch(ctx: &mut DeviceContext, cmd: Command, now: Option<&DateTime>) -
                 .rtc
                 .read_time()
                 .map(|dt| dt.shifted_minutes((offset_minutes - old_offset) as i32));
-            match ctx.counters.save_timezone_offset_minutes(offset_minutes) {
-                Ok(()) => match adjusted.and_then(|dt| ctx.board.rtc.write_time(&dt)) {
+            // Commit the hardware clock first. Persisting the new offset
+            // before this write would make a retry calculate a zero delta
+            // after an RTC failure, permanently leaving the two out of sync.
+            match adjusted.and_then(|dt| ctx.board.rtc.write_time(&dt)) {
+                Ok(()) => match ctx.counters.save_timezone_offset_minutes(offset_minutes) {
                     Ok(()) => Reply::Ok,
-                    Err(err) => Reply::Error {
-                        message: format!("Timezone saved, but RTC update failed: {err}"),
-                    },
+                    Err(err) => {
+                        // Best-effort rollback keeps the RTC consistent with
+                        // the still-persisted old offset.
+                        if let Ok(dt) = ctx.board.rtc.read_time() {
+                            let _ = ctx.board.rtc.write_time(
+                                &dt.shifted_minutes((old_offset - offset_minutes) as i32),
+                            );
+                        }
+                        Reply::Error {
+                            message: format!("RTC updated, but timezone save failed: {err}"),
+                        }
+                    }
                 },
                 Err(err) => Reply::Error {
-                    message: format!("Failed to save timezone: {err}"),
+                    message: format!("Failed to update RTC timezone: {err}"),
                 },
             }
         }
