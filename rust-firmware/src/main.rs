@@ -15,6 +15,7 @@ mod icons;
 mod inbox;
 mod nfc;
 mod power;
+mod reminders;
 mod rtc;
 mod screens;
 mod storage;
@@ -34,11 +35,10 @@ use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
 use canvas::Rect;
 use ctx::{AlarmScheduler, DeviceContext, SyncScheduler};
-use esp_idf_svc::systime::EspSystemTime;
 use inbox::InboxStore;
 use rtc::DateTime;
 use storage::PersistedCounters;
-use todos::{Importance, Todo, TodoStore};
+use todos::TodoStore;
 
 /// Poll cycles between two consecutive `power status` log lines.
 /// 50 × 20 ms = 1 s.
@@ -288,18 +288,6 @@ fn main() -> Result<()> {
         watchdog::feed();
         let mut dirty: Vec<Rect> = Vec::new();
 
-        // Show any unread urgent inbox message as a full-screen reminder with
-        // a persistent tone. Checked every loop iteration (cheap: an NVS read
-        // that returns immediately when empty) so an urgent message surfaces
-        // right away no matter which sync path fetched it - USB/CLI SyncNow,
-        // the urgent poll, or an automatic sync. The reminder blocks the main
-        // loop, so when it dismisses we must redraw the whole screen - a
-        // plain clock tick would only repaint the clock region and leave
-        // stale reminder pixels behind.
-        if maybe_remind_urgent_inbox(&mut ctx) {
-            dirty.push(FULL_SCREEN_RECT);
-        }
-
         status_tick += 1;
         if status_tick >= STATUS_REPORT_INTERVAL_POLLS {
             status_tick = 0;
@@ -313,9 +301,6 @@ fn main() -> Result<()> {
             clock_tick = 0;
             match ctx.board.rtc.read_time() {
                 Ok(dt) => {
-                    if ctx.poll_alarm(&dt) {
-                        dirty.push(FULL_SCREEN_RECT);
-                    }
                     let changed = clock
                         .as_ref()
                         .map(|prev| {
@@ -338,10 +323,7 @@ fn main() -> Result<()> {
                     // reminder shares the urgent-poll cadence (once per 30 s
                     // boundary, gated once/day anyway). Ordinary menu loops
                     // service this same scheduler through DeviceContext.
-                    if ctx.poll_scheduled_sync(&dt) {
-                        dirty.push(FULL_SCREEN_RECT);
-                    }
-                    if maybe_remind_due_todos(ctx.board, ctx.counters, ctx.todo_store, Some(&dt)) {
+                    if ctx.poll_runtime(&dt) {
                         dirty.push(FULL_SCREEN_RECT);
                     }
                 }
@@ -500,220 +482,3 @@ fn report_power_state(board: &mut Note4Board) -> Result<()> {
     }
     Ok(())
 }
-
-/// Checks - once per calendar day - whether any `High`-importance todo is
-/// due today and still open, and if so blocks the main loop on a "TODOS
-/// DUE" screen with a short tone burst until ENTER. The reminder date is
-/// recorded *before* the screen so a missed dismiss never re-rings on the
-/// next 30 s check. Runs only while the main loop is idle on Home (menus
-/// block the loop, so this can't interrupt them). Returns whether a screen
-/// was shown, so the caller can force a full redraw afterwards.
-fn maybe_remind_due_todos(
-    board: &mut Note4Board,
-    counters: &PersistedCounters,
-    todo_store: &TodoStore,
-    clock: Option<&DateTime>,
-) -> bool {
-    let Some(now) = clock else {
-        return false;
-    };
-    let date_key = format!("{:04}{:02}{:02}", now.year, now.month, now.day);
-    match counters.todo_reminded_date() {
-        Ok(Some(prev)) if prev == date_key => return false,
-        Ok(_) => {}
-        Err(err) => log::warn!("Failed to read todo reminder date: {err}"),
-    }
-
-    let Ok(list) = todo_store.load() else {
-        return false;
-    };
-    let due: Vec<&Todo> = list
-        .iter()
-        .filter(|t| {
-            if t.done || t.importance != Importance::High {
-                return false;
-            }
-            match &t.repeat {
-                Some(r) => r.fires_on(now.year, now.month, now.day, now.weekday),
-                None => t.due_date.is_some_and(|d| {
-                    d.year == now.year && d.month == now.month && d.day == now.day
-                }),
-            }
-        })
-        .collect();
-    if due.is_empty() {
-        return false;
-    }
-
-    if let Err(err) = counters.set_todo_reminded_date(&date_key) {
-        log::warn!("Failed to record todo reminder date: {err}");
-    }
-    log::info!("{} high-importance todo(s) due today; reminding", due.len());
-    remind_due_todos_screen(board, &due);
-    true
-}
-
-/// Full-screen "TODOS DUE" with up to 7 due items, a short 3-note tone
-/// burst, then a blocking wait for ENTER (or long ENTER) - same shape as
-/// the alarm ring screen, without the 5-minute timeout since these
-/// are far less urgent.
-fn remind_due_todos_screen(board: &mut Note4Board, due: &[&Todo]) {
-    let canvas = board.display.canvas_mut();
-    canvas.clear();
-    // Standard page header (brand + title + rule) so every full-screen
-    // alert shares the visual language of the rest of the UI.
-    ui::header(canvas, "TODOS DUE");
-    for (i, todo) in due.iter().take(7).enumerate() {
-        // Truncate long text by measured width so a CJK todo can't push
-        // the row off the right edge.
-        let text = screens::truncate_prop(&todo.text, 300);
-        canvas.draw_text_prop(16, 48 + i * 24, 1, &format!("!! {text}"));
-    }
-    if due.len() > 7 {
-        canvas.draw_text_prop(16, 268, 1, "MORE...");
-    }
-    canvas.draw_text_prop(16, 284, 1, "ENTER = DISMISS");
-    board.display.refresh_full_best_effort();
-
-    if let Some(audio) = board.audio.as_mut() {
-        for _ in 0..3 {
-            if let Err(err) = audio.play_sine_stereo(1046.0, 0.15, 8000) {
-                log::warn!("Todo reminder tone failed: {err}");
-                break;
-            }
-            thread::sleep(Duration::from_millis(150));
-        }
-    }
-
-    loop {
-        watchdog::feed();
-        if let Some(event) = board.key_enter.poll() {
-            if matches!(event, ButtonEvent::Pressed | ButtonEvent::LongPressed) {
-                break;
-            }
-        }
-        thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
-    }
-}
-
-/// Shows unread urgent (high-priority alert) inbox items as a full-screen
-/// reminder with an insistent tone, marking each read locally so it can't
-/// re-ring. The urgent poll + full sync above fetch them; this renders them.
-/// Runs only while idle on Home. Returns whether a reminder was shown, so
-/// the caller can force a full redraw afterwards (the reminder's full-screen
-/// render would otherwise leave stale pixels behind).
-fn maybe_remind_urgent_inbox(ctx: &mut DeviceContext) -> bool {
-    let Ok(list) = ctx.inbox_store.load() else {
-        return false;
-    };
-    let urgent: Vec<u64> = ctx.inbox_store.unread_urgent().unwrap_or_default();
-    if urgent.is_empty() {
-        return false;
-    }
-    // Mark every urgent item read first. If any persist fails, skip showing
-    // this batch entirely - otherwise a failed write would leave the item
-    // unread and this function would re-ring it on every loop iteration,
-    // looping forever.
-    for seq in &urgent {
-        if let Err(err) = ctx.inbox_store.mark_read(*seq) {
-            log::warn!("Failed to mark urgent inbox read; not reminding: {err}");
-            return false;
-        }
-    }
-    let titles: Vec<String> = list
-        .iter()
-        .filter(|it| urgent.contains(&it.id))
-        .map(|it| screens::truncate_prop(&it.title, 330))
-        .collect();
-    log::info!("{} urgent inbox message(s) to show", titles.len());
-    remind_urgent_screen(ctx.board, &titles);
-    true
-}
-
-/// Full-screen urgent reminder: title(s) with a persistent tone loop until
-/// ENTER dismisses it. Distinct from the normal alert by a longer, repeated
-/// tone and the "URGENT" page title so urgent messages are unmistakable.
-fn remind_urgent_screen(board: &mut Note4Board, titles: &[String]) {
-    let canvas = board.display.canvas_mut();
-    canvas.clear();
-    ui::header(canvas, "URGENT");
-    for (i, title) in titles.iter().take(4).enumerate() {
-        canvas.draw_text_prop(16, 48 + i * 24, 1, &format!("!! {title}"));
-    }
-    if titles.len() > 4 {
-        canvas.draw_text_prop(16, 268, 1, "MORE IN INBOX...");
-    }
-    canvas.draw_text_prop(16, 284, 1, "ENTER = DISMISS");
-    board.display.refresh_full_best_effort();
-
-    // Persistent tone bursts until dismissed - urgent messages keep beeping,
-    // unlike the normal short alert. Crank the DAC volume to max, use a large
-    // sine amplitude, and alternate high/low pitches so the urgent siren is
-    // unmistakably loud and distinct from a plain single tone.
-    //
-    // Dismiss is driven by `is_pressed()` (the button going down), not by the
-    // debounced release event - so a single short tap returns to Home the
-    // moment ENTER goes down, exactly as requested. The siren is played as
-    // short single notes with a tight press-poll window between each one, and
-    // the whole reminder is bounded by a safety timeout so an unattended
-    // device can't ring forever.
-    if let Some(audio) = board.audio.as_mut() {
-        if let Err(err) = audio.set_volume(255) {
-            log::warn!("Urgent volume boost failed: {err}");
-        }
-    }
-    // Two-note siren (F#6/C6) repeated until dismiss.
-    const SIREN: [(f32, f32); 2] = [(1397.0, 0.12), (1046.0, 0.12)];
-    let mut siren_step = 0usize;
-    let ring_start = EspSystemTime {}.now();
-    loop {
-        watchdog::feed();
-        // Keep the debouncer fed so a press is registered at all
-        // (`is_pressed` only reflects the debounced state that `poll`
-        // advances), and dismiss the moment ENTER is debounced-down,
-        // without waiting for its release.
-        board.key_enter.poll();
-        // Dismiss as soon as ENTER goes down (raw press, no release wait).
-        if board.key_enter.is_pressed() {
-            // Drain the button so its eventual release can't emit a stray
-            // `Pressed` that leaks into the main loop as a spurious action.
-            while board.key_enter.poll().is_some() {}
-            return;
-        }
-        if (EspSystemTime {}).now().saturating_sub(ring_start)
-            >= Duration::from_secs(URGENT_RING_MAX_SECS)
-        {
-            log::warn!("Urgent reminder timed out after {URGENT_RING_MAX_SECS}s");
-            return;
-        }
-        let (freq, dur) = SIREN[siren_step % SIREN.len()];
-        if let Some(audio) = board.audio.as_mut() {
-            if let Err(err) = audio.play_sine_stereo(freq, dur, 24000) {
-                log::warn!("Urgent siren note failed: {err}");
-            }
-        } else {
-            thread::sleep(Duration::from_millis(dur as u64 * 1000));
-        }
-        siren_step += 1;
-        // Tight press-poll window after each note so a press is caught
-        // promptly between siren notes (never during a long blocking play).
-        let poll_deadline = EspSystemTime {}.now() + Duration::from_millis(400);
-        loop {
-            watchdog::feed();
-            board.key_enter.poll();
-            if board.key_enter.is_pressed() {
-                while board.key_enter.poll().is_some() {}
-                return;
-            }
-            let now = EspSystemTime {}.now();
-            if now >= poll_deadline {
-                break;
-            }
-            thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
-        }
-    }
-}
-
-/// Safety bound so an unattended urgent reminder can't ring forever and drain
-/// the battery; generous for an urgent alert.
-const URGENT_RING_MAX_SECS: u64 = 120;

@@ -102,11 +102,7 @@ impl DeviceContext<'_> {
             if self.sync_scheduler.last_ui_poll.elapsed() >= Duration::from_secs(1) {
                 self.sync_scheduler.last_ui_poll = Instant::now();
                 match self.board.rtc.read_time() {
-                    Ok(fresh) => {
-                        let alarm_changed = self.poll_alarm(&fresh);
-                        let sync_changed = self.poll_scheduled_sync(&fresh);
-                        alarm_changed || sync_changed
-                    }
+                    Ok(fresh) => self.poll_runtime(&fresh),
                     Err(err) => {
                         log::warn!("RTC read failed in UI background poll: {err}");
                         false
@@ -116,6 +112,30 @@ impl DeviceContext<'_> {
                 false
             };
         usb_changed || runtime_changed
+    }
+
+    /// Services all RTC-driven work shared by Home and ordinary screens.
+    pub fn poll_runtime(&mut self, now: &DateTime) -> bool {
+        let alarm_changed = self.poll_alarm(now);
+        let sync_changed = self.poll_scheduled_sync(now);
+        let reminder_changed = self.poll_reminders(now);
+        alarm_changed || sync_changed || reminder_changed
+    }
+
+    /// Services alerts that do not use Wi-Fi. BLE pairing uses this variant
+    /// because BLE and Wi-Fi cannot be active together on this device.
+    pub fn poll_local_alerts(&mut self, now: &DateTime) -> bool {
+        self.poll_alarm(now) || self.poll_reminders(now)
+    }
+
+    fn poll_reminders(&mut self, now: &DateTime) -> bool {
+        crate::reminders::poll(
+            self.board,
+            self.counters,
+            self.todo_store,
+            self.inbox_store,
+            now,
+        )
     }
 
     /// Re-arms alarms at minute/date boundaries and handles a live AF flag.

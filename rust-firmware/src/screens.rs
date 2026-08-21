@@ -1290,7 +1290,7 @@ fn ble_pairing_screen(
                         .rtc
                         .read_time()
                         .ok()
-                        .is_some_and(|fresh| ctx.poll_alarm(&fresh))
+                        .is_some_and(|fresh| ctx.poll_local_alerts(&fresh))
                     {
                         break;
                     }

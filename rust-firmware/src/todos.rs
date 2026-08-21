@@ -26,8 +26,8 @@ pub enum Importance {
 }
 
 /// Full due date (year/month/day). The calendar page draws a marker on that
-/// date, and a `High` todo due today triggers a one-shot reminder in
-/// `main.rs`. The `year` field defaults to 0 so records synced before it
+/// date, and a `High` todo due today triggers a one-shot reminder through
+/// `reminders.rs`. The `year` field defaults to 0 so records synced before it
 /// existed deserialize safely (year 0 never matches a real date, so such
 /// todos simply don't mark the calendar or remind).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

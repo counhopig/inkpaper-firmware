@@ -1,7 +1,7 @@
 # rust-firmware — inkwash-note4 crate
 
 ## OVERVIEW
-The single crate containing all product code: ESP32-S3 firmware with 21 flat src modules (no subdirectories, including `main.rs`) + 1 C++ EPD FFI component. Entry point `src/main.rs:85` (`[[bin]] inkwash-note4`).
+The single crate containing all product code: ESP32-S3 firmware with 28 flat src modules (no subdirectories, including `main.rs`) + 1 C++ EPD FFI component. Entry point `src/main.rs:85` (`[[bin]] inkwash-note4`).
 
 ## MODULE MAP (src/)
 | Group | Module | Responsibility |
@@ -13,7 +13,7 @@ The single crate containing all product code: ESP32-S3 firmware with 21 flat src
 | Hardware | `button.rs` / `watchdog.rs` / `audio.rs` / `nfc.rs` | debounce + short press/1s long press; task WDT; ES8311; GT23SC6699 |
 | Rendering | `canvas.rs` / `font8x16.rs` / `home.rs` / `display.rs` | 1bpp framebuffer + stroke_rect outline; proportional-width glyphs; **pure home-screen layout (no EPD FFI, PC-previewable via `tools/preview`)**; EPD FFI wrapper + `render_home` delegation |
 | UI | `ui.rs` / `screens.rs` | 3-button generic components (list selection, nav drawer); nav drawer/calendar/alarms/todos/settings menu (entered via long-press UP/DOWN, no on-device text input). `ui::header` carries the home screen's ink-square brand block; `pick_from_list` returns `PickResult::{Selected,Cancelled,OpenNav}` so long-press UP/DOWN opens the GO TO drawer from Settings too. |
-| Services | `alarms.rs` / `todos.rs` / `storage.rs` | NVS store; alarms owns ringing/ack and picks the soonest one to arm PCF8563 |
+| Services | `alarms.rs` / `todos.rs` / `inbox.rs` / `storage.rs` / `reminders.rs` | NVS stores; alarms owns ringing/ack and RTC scheduling; reminders owns full-screen todo/inbox alerts shared across UI loops |
 | Protocol | `control.rs` / `usb_console.rs` / `ble_control.rs` / `sync.rs` / `wifi.rs` | `>>IW `/`<<IW ` command protocol (USB/BLE share `control::dispatch`); HTTPS sync; WifiManager |
 
 ## FFI COMPONENT: components/zectrix_epd/
