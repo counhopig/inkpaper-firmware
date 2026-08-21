@@ -5,6 +5,7 @@
 use crate::alarms::{self, AlarmStore, Repeat, StoredAlarm};
 use crate::board::Note4Board;
 use crate::canvas::Canvas;
+use crate::ctx::DeviceContext;
 use crate::display::Rect;
 use crate::inbox::{InboxItem, InboxStore};
 use crate::rtc::{is_leap, DateTime};
@@ -15,7 +16,6 @@ use crate::ui::{
     draw_rows, footer, header, pick_from_list, pick_number, poll_nav, show_message, tick, Nav,
     PickResult,
 };
-use crate::wifi::WifiManager;
 
 /// Entry point from Home's ENTER short-press: shows the top-level menu and
 /// recurses into whichever screen the user picks, returning once they back
@@ -23,12 +23,7 @@ use crate::wifi::WifiManager;
 /// own full screen afterwards - none of these screens know how to render
 /// the home screen themselves.
 pub fn open_menu(
-    board: &mut Note4Board,
-    counters: &PersistedCounters,
-    wifi_mgr: &mut WifiManager,
-    alarm_store: &AlarmStore,
-    todo_store: &TodoStore,
-    inbox_store: &InboxStore,
+    ctx: &mut DeviceContext,
     now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
@@ -40,41 +35,24 @@ pub fn open_menu(
     ];
     loop {
         let want_nav = match pick_from_list(
-            board,
+            ctx.board,
             "SETTINGS",
             &items,
             "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
             0,
         ) {
             PickResult::Selected(0) => {
-                sync_now_screen(
-                    board,
-                    counters,
-                    wifi_mgr,
-                    alarm_store,
-                    todo_store,
-                    inbox_store,
-                    now,
-                );
+                sync_now_screen(ctx, now);
                 false
             }
-            PickResult::Selected(1) => sync_interval_screen(board, counters),
+            PickResult::Selected(1) => sync_interval_screen(ctx.board, ctx.counters),
             PickResult::Selected(2) => {
-                ble_pairing_screen(
-                    board,
-                    counters,
-                    wifi_mgr,
-                    alarm_store,
-                    todo_store,
-                    inbox_store,
-                    now,
-                    ble_control,
-                );
+                ble_pairing_screen(ctx, now, ble_control);
                 false
             }
             PickResult::Selected(3) => {
                 show_message(
-                    board,
+                    ctx.board,
                     "SLEEP",
                     &["GOING TO SLEEP"],
                     std::time::Duration::from_millis(500),
@@ -88,16 +66,7 @@ pub fn open_menu(
         // Long UP/DOWN inside Settings opens the GO TO drawer, matching
         // every other page (from here you can reach Todos/Calendar/etc.).
         if want_nav {
-            open_navigation(
-                board,
-                counters,
-                wifi_mgr,
-                alarm_store,
-                todo_store,
-                inbox_store,
-                now,
-                ble_control,
-            );
+            open_navigation(ctx, now, ble_control);
             return;
         }
     }
@@ -278,17 +247,12 @@ fn pick_navigation(board: &mut Note4Board, current: Page) -> Option<usize> {
 /// Opens the global navigation directory. Both long UP and long DOWN enter
 /// this directory; short UP/DOWN selects a destination and ENTER opens it.
 pub fn open_navigation(
-    board: &mut Note4Board,
-    counters: &PersistedCounters,
-    wifi_mgr: &mut WifiManager,
-    alarm_store: &AlarmStore,
-    todo_store: &TodoStore,
-    inbox_store: &InboxStore,
+    ctx: &mut DeviceContext,
     now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
     loop {
-        let Some(selected) = pick_navigation(board, Page::Home) else {
+        let Some(selected) = pick_navigation(ctx.board, Page::Home) else {
             return;
         };
         match selected {
@@ -300,29 +264,10 @@ pub fn open_navigation(
                     3 => Page::Alarms,
                     _ => Page::Todos,
                 };
-                browse_page(
-                    board,
-                    page,
-                    counters,
-                    wifi_mgr,
-                    alarm_store,
-                    todo_store,
-                    inbox_store,
-                    now,
-                    ble_control,
-                );
+                browse_page(ctx, page, now, ble_control);
                 return;
             }
-            5 => open_menu(
-                board,
-                counters,
-                wifi_mgr,
-                alarm_store,
-                todo_store,
-                inbox_store,
-                now,
-                ble_control,
-            ),
+            5 => open_menu(ctx, now, ble_control),
             _ => {}
         }
     }
@@ -332,13 +277,8 @@ pub fn open_navigation(
 /// cancelling that overlay restores this page.
 #[allow(clippy::too_many_arguments)]
 fn browse_page(
-    board: &mut Note4Board,
+    ctx: &mut DeviceContext,
     mut page: Page,
-    counters: &PersistedCounters,
-    wifi_mgr: &mut WifiManager,
-    alarm_store: &AlarmStore,
-    todo_store: &TodoStore,
-    inbox_store: &InboxStore,
     now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
@@ -354,19 +294,21 @@ fn browse_page(
         if needs_redraw {
             match page {
                 Page::Home => {
-                    let next_alarm = now.and_then(|dt| next_alarm_label(alarm_store, dt));
-                    let todo_summary = todo_summary(todo_store, now);
-                    let unread_inbox = inbox_store.unread_count().unwrap_or(0);
-                    let wifi_configured = counters
+                    let next_alarm = now.and_then(|dt| next_alarm_label(ctx.alarm_store, dt));
+                    let todo_summary = todo_summary(ctx.todo_store, now);
+                    let unread_inbox = ctx.inbox_store.unread_count().unwrap_or(0);
+                    let wifi_configured = ctx
+                        .counters
                         .wifi_creds()
                         .map(|creds| creds.is_some())
                         .unwrap_or(false);
-                    let battery_percent = board
+                    let battery_percent = ctx
+                        .board
                         .battery_millivolts()
                         .ok()
                         .map(crate::board::battery_percent_from_mv);
-                    let charge = board.charge_snapshot();
-                    board.display.render_home(
+                    let charge = ctx.board.charge_snapshot();
+                    ctx.board.display.render_home(
                         now,
                         next_alarm.as_ref().map(|label| label.time.as_str()),
                         next_alarm.as_ref().and_then(|label| label.date.as_deref()),
@@ -380,11 +322,11 @@ fn browse_page(
                     );
                 }
                 Page::Calendar => {
-                    let canvas = board.display.canvas_mut();
+                    let canvas = ctx.board.display.canvas_mut();
                     canvas.clear();
                     header(canvas, "CALENDAR");
                     if let Some(dt) = now {
-                        let todos = todo_store.load().unwrap_or_default();
+                        let todos = ctx.todo_store.load().unwrap_or_default();
                         // Day markers for the visible month: whether a todo
                         // is due that day (repeat schedule, or its single
                         // due date), carrying importance so the marker can
@@ -420,15 +362,15 @@ fn browse_page(
                         "UP/DOWN MOVE   ENTER WEEK VIEW   HOLD UP/DOWN SWITCH PAGE",
                     );
                 }
-                Page::Alarms => render_alarm_page(board, alarm_store, alarm_selected),
-                Page::Todos => render_todo_page(board, todo_store, todo_selected, now),
-                Page::Inbox => render_inbox_page(board, inbox_store, inbox_selected),
+                Page::Alarms => render_alarm_page(ctx.board, ctx.alarm_store, alarm_selected),
+                Page::Todos => render_todo_page(ctx.board, ctx.todo_store, todo_selected, now),
+                Page::Inbox => render_inbox_page(ctx.board, ctx.inbox_store, inbox_selected),
             }
             if first_draw {
-                let _ = board.display.refresh_full();
+                let _ = ctx.board.display.refresh_full();
                 first_draw = false;
             } else {
-                let _ = board.display.refresh_partial(Rect {
+                let _ = ctx.board.display.refresh_partial(Rect {
                     x: 0,
                     y: 0,
                     width: 400,
@@ -438,24 +380,15 @@ fn browse_page(
             needs_redraw = false;
         }
 
-        match poll_nav(board) {
+        match poll_nav(ctx.board) {
             Nav::PageUp | Nav::PageDown => {
-                match pick_navigation(board, page) {
+                match pick_navigation(ctx.board, page) {
                     Some(0) => return,
                     Some(1) => page = Page::Calendar,
                     Some(2) => page = Page::Inbox,
                     Some(3) => page = Page::Alarms,
                     Some(4) => page = Page::Todos,
-                    Some(5) => open_menu(
-                        board,
-                        counters,
-                        wifi_mgr,
-                        alarm_store,
-                        todo_store,
-                        inbox_store,
-                        now,
-                        ble_control,
-                    ),
+                    Some(5) => open_menu(ctx, now, ble_control),
                     Some(_) | None => {}
                 }
                 needs_redraw = true;
@@ -465,7 +398,7 @@ fn browse_page(
                     // Long ENTER cycles a todo's importance (Low -> Medium
                     // -> High) instead of leaving the page - long UP/DOWN
                     // opens the navigation drawer, which is the way out.
-                    cycle_todo_importance(todo_store, todo_selected);
+                    cycle_todo_importance(ctx.todo_store, todo_selected);
                     needs_redraw = true;
                 } else if page == Page::Home {
                     return;
@@ -495,19 +428,19 @@ fn browse_page(
             },
             Nav::Down => match page {
                 Page::Alarms => {
-                    let len = alarm_store.load().map(|v| v.len()).unwrap_or(0) + 1;
+                    let len = ctx.alarm_store.load().map(|v| v.len()).unwrap_or(0) + 1;
                     alarm_selected = (alarm_selected + 1).min(len - 1);
                     needs_redraw = true;
                 }
                 Page::Todos => {
-                    let len = todo_store.load().map(|v| v.len()).unwrap_or(0);
+                    let len = ctx.todo_store.load().map(|v| v.len()).unwrap_or(0);
                     if len > 0 {
                         todo_selected = (todo_selected + 1).min(len - 1);
                         needs_redraw = true;
                     }
                 }
                 Page::Inbox => {
-                    let len = inbox_store.load().map(|v| v.len()).unwrap_or(0);
+                    let len = ctx.inbox_store.load().map(|v| v.len()).unwrap_or(0);
                     if len > 0 {
                         inbox_selected = (inbox_selected + 1).min(len - 1);
                         needs_redraw = true;
@@ -525,12 +458,21 @@ fn browse_page(
             Nav::Enter => {
                 match page {
                     Page::Home => {}
-                    Page::Alarms => activate_alarm_row(board, alarm_store, now, alarm_selected),
-                    Page::Todos => activate_todo_row(todo_store, todo_selected),
-                    Page::Inbox => open_inbox_item(board, inbox_store, inbox_selected),
+                    Page::Alarms => {
+                        activate_alarm_row(ctx.board, ctx.alarm_store, now, alarm_selected)
+                    }
+                    Page::Todos => activate_todo_row(ctx.todo_store, todo_selected),
+                    Page::Inbox => open_inbox_item(ctx.board, ctx.inbox_store, inbox_selected),
                     Page::Calendar => {
                         if let Some(dt) = now {
-                            week_view(board, todo_store, dt.year, dt.month, cal_selected_day, now);
+                            week_view(
+                                ctx.board,
+                                ctx.todo_store,
+                                dt.year,
+                                dt.month,
+                                cal_selected_day,
+                                now,
+                            );
                         }
                     }
                 }
@@ -1064,18 +1006,10 @@ fn add_alarm_screen(board: &mut Note4Board, existing: &[StoredAlarm]) -> Option<
 /// both must connect Wi-Fi first: `main.rs` drops the boot-time connection
 /// once NTP sync is done, so by the time a user reaches this screen there
 /// usually isn't an active Wi-Fi connection to piggyback on).
-fn sync_now_screen(
-    board: &mut Note4Board,
-    counters: &PersistedCounters,
-    wifi_mgr: &mut WifiManager,
-    alarm_store: &AlarmStore,
-    todo_store: &TodoStore,
-    inbox_store: &InboxStore,
-    now: Option<&DateTime>,
-) {
+fn sync_now_screen(ctx: &mut DeviceContext, now: Option<&DateTime>) {
     let Some(now_dt) = now else {
         show_message(
-            board,
+            ctx.board,
             "NO CLOCK",
             &["Clock not available"],
             std::time::Duration::from_secs(2),
@@ -1084,14 +1018,13 @@ fn sync_now_screen(
     };
 
     match sync::sync_now(
-        counters,
-        wifi_mgr,
-        alarm_store,
-        todo_store,
-        inbox_store,
-        &mut board.rtc,
+        ctx.counters,
+        ctx.wifi_mgr,
+        ctx.alarm_store,
+        ctx.todo_store,
+        ctx.inbox_store,
+        &mut ctx.board.rtc,
         now_dt,
-        false,
     ) {
         Ok(sync::SyncOutcome::Applied {
             alarm_count,
@@ -1105,7 +1038,12 @@ fn sync_now_screen(
             } else {
                 format!("A:{alarm_count} T:{todo_count} IN:{inbox_count}")
             };
-            show_message(board, "SYNC OK", &[&msg], std::time::Duration::from_secs(2));
+            show_message(
+                ctx.board,
+                "SYNC OK",
+                &[&msg],
+                std::time::Duration::from_secs(2),
+            );
         }
         Err(err) => {
             let err_msg = err.to_string();
@@ -1117,7 +1055,7 @@ fn sync_now_screen(
                 err_msg
             };
             show_message(
-                board,
+                ctx.board,
                 "SYNC FAILED",
                 &[&truncated],
                 std::time::Duration::from_secs(2),
@@ -1128,12 +1066,7 @@ fn sync_now_screen(
 }
 
 fn ble_pairing_screen(
-    board: &mut Note4Board,
-    counters: &PersistedCounters,
-    wifi_mgr: &mut WifiManager,
-    alarm_store: &AlarmStore,
-    todo_store: &TodoStore,
-    inbox_store: &InboxStore,
+    ctx: &mut DeviceContext,
     now: Option<&DateTime>,
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
@@ -1144,7 +1077,7 @@ fn ble_pairing_screen(
             log::info!("BLE pairing screen: started advertising");
 
             // Display the pairing screen with instructions.
-            let canvas = board.display.canvas_mut();
+            let canvas = ctx.board.display.canvas_mut();
             canvas.clear();
             header(canvas, "BLE PAIRING");
             canvas.draw_text_prop(8, 40, 1, "CONNECTING...");
@@ -1152,7 +1085,7 @@ fn ble_pairing_screen(
             canvas.draw_text_prop(8, 72, 1, "d2c25e50-");
             canvas.draw_text_prop(8, 84, 1, "5e22-48d8...");
             footer(canvas, "HOLD ENTER BACK");
-            let _ = board.display.refresh_full();
+            let _ = ctx.board.display.refresh_full();
 
             // This screen owns the main thread while pairing is active, so it
             // must drain BLE commands here. Waiting for the outer Home loop
@@ -1161,16 +1094,7 @@ fn ble_pairing_screen(
             let started_at = std::time::Instant::now();
             loop {
                 if let Some(cmd) = ble_control.as_ref().and_then(|ble| ble.poll_command()) {
-                    let reply = crate::control::dispatch(
-                        cmd,
-                        board,
-                        counters,
-                        wifi_mgr,
-                        alarm_store,
-                        todo_store,
-                        inbox_store,
-                        now,
-                    );
+                    let reply = crate::control::dispatch(ctx, cmd, now);
                     if let Some(ble) = ble_control.as_ref() {
                         ble.write_reply(&reply);
                     }
@@ -1179,7 +1103,7 @@ fn ble_pairing_screen(
                 // either ENTER gesture exits. The timeout is a final escape
                 // hatch if a button event is ever lost while the radio stack
                 // is active.
-                if matches!(poll_nav(board), Nav::Enter | Nav::Cancel)
+                if matches!(poll_nav(ctx.board), Nav::Enter | Nav::Cancel)
                     || started_at.elapsed() >= std::time::Duration::from_secs(120)
                 {
                     break;
@@ -1190,7 +1114,7 @@ fn ble_pairing_screen(
         Err(err) => {
             log::warn!("Failed to start BLE: {err}");
             show_message(
-                board,
+                ctx.board,
                 "BLE ERROR",
                 &[&err.to_string()],
                 std::time::Duration::from_secs(2),

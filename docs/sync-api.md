@@ -174,16 +174,16 @@ pending-read set.
 **`inbox_truncated`** (bool, optional): `true` when the server has more inbox
 items than it could fit in this response.
 
-#### Long-polling (urgent delivery)
+#### Lightweight urgent poll
 
-The device may include an `X-Inkpaper-Wait: 1` header on `POST /api/sync`.
-The server then holds the connection (polling internally, up to a ~30s
-timeout) until an unread `high`-priority inbox message exists, returning
-immediately when one arrives. This keeps the device's Wi-Fi connected during
-the hold and surfaces urgent messages in real time instead of re-connecting
-on a timer. When no urgent message arrives, the request returns after the
-timeout with whatever inbox it has. This is how the firmware's urgent
-reminder gets messages without an aggressive polling interval.
+The device may include an `X-Inkpaper-Poll: 1` header on `POST /api/sync`
+(with an empty `{}` body). The server answers **immediately** with a tiny
+`{"urgent": true|false}` response - it does not hold the connection, does not
+merge device state, and does not return the full payload. The firmware calls
+this on a short timer (e.g. every 30 s) to detect high-priority messages
+without keeping a long connection open or blocking its main loop. When
+`urgent` is `true`, the device performs a normal full `POST /api/sync` to pull
+the message down and show the urgent reminder.
 
 #### ETag Header (optional)
 

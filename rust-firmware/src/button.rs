@@ -68,4 +68,12 @@ impl Button {
         }
         event
     }
+
+    /// Whether the button is currently pressed (debounced, raw low level).
+    /// Unlike [`Button::poll`], which emits `Pressed` only on *release*, this
+    /// lets a caller act on the press itself - e.g. dismiss a full-screen
+    /// reminder the moment ENTER goes down, without waiting for the release.
+    pub fn is_pressed(&self) -> bool {
+        self.debounced
+    }
 }

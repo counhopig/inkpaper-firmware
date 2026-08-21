@@ -5,6 +5,7 @@ mod board;
 mod button;
 mod canvas;
 mod control;
+mod ctx;
 mod display;
 mod font5x7;
 mod font8x16;
@@ -31,6 +32,7 @@ use anyhow::Result;
 use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
 use canvas::Rect;
+use ctx::DeviceContext;
 use esp_idf_svc::systime::EspSystemTime;
 use inbox::InboxStore;
 use rtc::DateTime;
@@ -270,57 +272,69 @@ fn main() -> Result<()> {
         }
     };
 
+    // Bundle the long-lived state into one context, then run the main loop
+    // through it instead of threading board/stores/wifi individually.
+    let mut ctx = DeviceContext {
+        board: &mut board,
+        counters: &counters,
+        wifi_mgr: &mut wifi_mgr,
+        alarm_store: &alarm_store,
+        todo_store: &todo_store,
+        inbox_store: &inbox_store,
+    };
+
     let mut status_tick = 0u32;
     let mut clock_tick = 0u32;
     let mut auto_sync_tick = 0u32;
     let mut ble_control: Option<ble_control::BleControl> = None;
     loop {
         watchdog::feed();
+        let mut dirty: Vec<Rect> = Vec::new();
+
+        // Show any unread urgent inbox message as a full-screen reminder with
+        // a persistent tone. Checked every loop iteration (cheap: an NVS read
+        // that returns immediately when empty) so an urgent message surfaces
+        // right away no matter which sync path fetched it - USB/CLI SyncNow,
+        // the urgent poll, or an automatic sync. The reminder blocks the main
+        // loop, so when it dismisses we must redraw the whole screen - a
+        // plain clock tick would only repaint the clock region and leave
+        // stale reminder pixels behind.
+        if maybe_remind_urgent_inbox(&mut ctx) {
+            dirty.push(FULL_SCREEN_RECT);
+        }
+
         status_tick += 1;
         if status_tick >= STATUS_REPORT_INTERVAL_POLLS {
             status_tick = 0;
-            if let Err(err) = report_power_state(&mut board) {
+            if let Err(err) = report_power_state(ctx.board) {
                 log::warn!("Power status probe failed: {err}");
             }
         }
 
-        // Periodic auto-sync check every 30 s (1500 × 20 ms). The check
-        // itself is cheap (two NVS reads); the actual sync only runs when
-        // the elapsed time since the last one exceeds the configured
-        // interval (see `screens.rs`'s SYNC INTERVAL setting). The due-todo
-        // reminder rides the same cadence - it too must not fire mid-menu,
-        // and this is the only place the main loop is guaranteed idle.
+        // Periodic sync check every 30 s (1500 × 20 ms). The check itself is
+        // cheap (two NVS reads). It does two things on separate timers:
+        //   - urgent poll: every cycle, a lightweight poll (short connection,
+        //     server answers immediately) for high-priority inbox messages;
+        //   - full sync: only when the elapsed time since the last one
+        //     exceeds the configured interval (see `screens.rs`'s SYNC
+        //     INTERVAL setting).
+        // The due-todo reminder rides the same cadence - it too must not fire
+        // mid-menu, and this is the only place the main loop is guaranteed
+        // idle. Like the urgent reminder it blocks the loop, so dismissing
+        // it also forces a full redraw.
         auto_sync_tick += 1;
         if auto_sync_tick >= 1500 {
             auto_sync_tick = 0;
-            maybe_auto_sync(
-                &mut board,
-                &counters,
-                &mut wifi_mgr,
-                &alarm_store,
-                &todo_store,
-                &inbox_store,
-                clock.as_ref(),
-            );
-            maybe_remind_due_todos(&mut board, &counters, &todo_store, clock.as_ref());
-            long_poll_urgent(
-                &mut board,
-                &counters,
-                &mut wifi_mgr,
-                &alarm_store,
-                &todo_store,
-                &inbox_store,
-                clock.as_ref(),
-            );
-            maybe_remind_urgent_inbox(&mut board, &inbox_store);
+            maybe_auto_sync(&mut ctx, clock.as_ref());
+            if maybe_remind_due_todos(ctx.board, ctx.counters, ctx.todo_store, clock.as_ref()) {
+                dirty.push(FULL_SCREEN_RECT);
+            }
         }
-
-        let mut dirty: Vec<Rect> = Vec::new();
 
         clock_tick += 1;
         if clock_tick >= CLOCK_POLL_INTERVAL_POLLS {
             clock_tick = 0;
-            match board.rtc.read_time() {
+            match ctx.board.rtc.read_time() {
                 Ok(dt) => {
                     let changed = clock
                         .as_ref()
@@ -342,16 +356,7 @@ fn main() -> Result<()> {
         // Poll USB console for incoming commands, dispatch them, and send replies.
         if let Some(cmd) = usb_console.poll_command() {
             let needs_full_redraw = matches!(cmd, control::Command::SyncNow);
-            let reply = control::dispatch(
-                cmd,
-                &mut board,
-                &counters,
-                &mut wifi_mgr,
-                &alarm_store,
-                &todo_store,
-                &inbox_store,
-                clock.as_ref(),
-            );
+            let reply = control::dispatch(&mut ctx, cmd, clock.as_ref());
             if needs_full_redraw && matches!(reply, control::Reply::Ok) {
                 dirty.push(FULL_SCREEN_RECT);
             }
@@ -362,16 +367,7 @@ fn main() -> Result<()> {
         if let Some(ble) = &ble_control {
             if let Some(cmd) = ble.poll_command() {
                 let needs_full_redraw = matches!(cmd, control::Command::SyncNow);
-                let reply = control::dispatch(
-                    cmd,
-                    &mut board,
-                    &counters,
-                    &mut wifi_mgr,
-                    &alarm_store,
-                    &todo_store,
-                    &inbox_store,
-                    clock.as_ref(),
-                );
+                let reply = control::dispatch(&mut ctx, cmd, clock.as_ref());
                 if needs_full_redraw && matches!(reply, control::Reply::Ok) {
                     dirty.push(FULL_SCREEN_RECT);
                 }
@@ -379,7 +375,7 @@ fn main() -> Result<()> {
             }
         }
 
-        if let Some(event) = board.key_enter.poll() {
+        if let Some(event) = ctx.board.key_enter.poll() {
             match event {
                 ButtonEvent::Pressed => {
                     // Home has no primary action. Settings is reached only
@@ -392,46 +388,28 @@ fn main() -> Result<()> {
                 ButtonEvent::Released => {}
             }
         }
-        if let Some(event) = board.key_up.poll() {
+        if let Some(event) = ctx.board.key_up.poll() {
             match event {
                 ButtonEvent::Pressed => {
                     // Home has no vertical selection.
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("UP long pressed; opening navigation");
-                    screens::open_navigation(
-                        &mut board,
-                        &counters,
-                        &mut wifi_mgr,
-                        &alarm_store,
-                        &todo_store,
-                        &inbox_store,
-                        clock.as_ref(),
-                        &mut ble_control,
-                    );
+                    screens::open_navigation(&mut ctx, clock.as_ref(), &mut ble_control);
                     dirty.push(FULL_SCREEN_RECT);
                 }
                 ButtonEvent::Released => {}
             }
         }
 
-        if let Some(event) = board.key_down.poll() {
+        if let Some(event) = ctx.board.key_down.poll() {
             match event {
                 ButtonEvent::Pressed => {
                     // Home has no vertical selection.
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("DOWN long pressed; opening navigation");
-                    screens::open_navigation(
-                        &mut board,
-                        &counters,
-                        &mut wifi_mgr,
-                        &alarm_store,
-                        &todo_store,
-                        &inbox_store,
-                        clock.as_ref(),
-                        &mut ble_control,
-                    );
+                    screens::open_navigation(&mut ctx, clock.as_ref(), &mut ble_control);
                     dirty.push(FULL_SCREEN_RECT);
                 }
                 ButtonEvent::Released => {}
@@ -440,21 +418,21 @@ fn main() -> Result<()> {
 
         if !dirty.is_empty() {
             render_home_now(
-                &mut board,
-                &counters,
-                &alarm_store,
-                &todo_store,
-                &inbox_store,
+                ctx.board,
+                ctx.counters,
+                ctx.alarm_store,
+                ctx.todo_store,
+                ctx.inbox_store,
                 clock.as_ref(),
             );
             if dirty
                 .iter()
                 .any(|rect| rect.width == 400 && rect.height == 300)
             {
-                board.display.refresh_partial(FULL_SCREEN_RECT)?;
+                ctx.board.display.refresh_partial(FULL_SCREEN_RECT)?;
             } else {
                 for rect in &dirty {
-                    board.display.refresh_partial(*rect)?;
+                    ctx.board.display.refresh_partial(*rect)?;
                 }
             }
             log::info!("Partial display refresh completed");
@@ -503,42 +481,53 @@ fn render_home_now(
     );
 }
 
-/// Periodic auto-sync entry point, called every ~30 s from the main loop.
-/// Runs a full sync (via `sync::sync_now`, which connects Wi-Fi on demand -
-/// safe to do repeatedly now that `wifi::WifiManager::connect` no longer
-/// scans) when the elapsed time since the last successful sync exceeds the
-/// configured interval. Requires the device to be on Home (the main loop
-/// blocks inside any menu screen, so this only fires while idle), and
-/// requires server + Wi-Fi configuration to exist. Failures are logged and
-/// retried on the next check.
-fn maybe_auto_sync(
-    board: &mut Note4Board,
-    counters: &PersistedCounters,
-    wifi_mgr: &mut wifi::WifiManager,
-    alarm_store: &AlarmStore,
-    todo_store: &TodoStore,
-    inbox_store: &InboxStore,
-    clock: Option<&DateTime>,
-) {
+/// Periodic sync entry point, called every ~30 s from the main loop. Two
+/// things happen on independent timers:
+///   - An urgent poll every cycle: a lightweight connection (server answers
+///     immediately) checks for high-priority inbox messages. If one is found,
+///     a full sync runs right away to fetch it.
+///   - A full sync when the elapsed time since the last one exceeds the
+///     configured interval (normal content stays on the slow timer).
+///
+/// Requires Wi-Fi + server config; failures are logged and retried next cycle.
+fn maybe_auto_sync(ctx: &mut DeviceContext, clock: Option<&DateTime>) {
     let Some(now) = clock else {
         return;
     };
-    let server_configured = counters
+    let server_configured = ctx
+        .counters
         .device_config()
         .map(|cfg| cfg.is_some())
         .unwrap_or(false);
     if !server_configured {
         return;
     }
-    let wifi_configured = counters
+    let wifi_configured = ctx
+        .counters
         .wifi_creds()
         .map(|creds| creds.is_some())
         .unwrap_or(false);
     if !wifi_configured {
         return;
     }
-    let interval = counters.sync_interval_minutes().unwrap_or(60) as u64;
-    let due = match counters.last_sync_epoch().unwrap_or(None) {
+
+    // Urgent poll every cycle: short connection, immediate answer. If the
+    // server reports an unread high-priority message, do a full sync now to
+    // pull it in real time.
+    let urgent = sync::poll_urgent(ctx.counters, ctx.wifi_mgr);
+    match urgent {
+        Ok(true) => {
+            log::info!("Urgent message available; syncing");
+            run_full_sync(ctx, now);
+            return;
+        }
+        Ok(false) => {}
+        Err(err) => log::warn!("Urgent poll failed: {err}"),
+    }
+
+    // Full sync only when the configured interval has elapsed.
+    let interval = ctx.counters.sync_interval_minutes().unwrap_or(60) as u64;
+    let due = match ctx.counters.last_sync_epoch().unwrap_or(None) {
         Some(last) => now.to_unix().saturating_sub(last) >= interval * 60,
         None => true,
     };
@@ -546,24 +535,35 @@ fn maybe_auto_sync(
         return;
     }
     log::info!("Automatic sync due (interval {interval} min); syncing");
+    run_full_sync(ctx, now);
+}
+
+/// Runs a full `sync::sync_now` and refreshes the home screen on success.
+fn run_full_sync(ctx: &mut DeviceContext, now: &DateTime) {
     match sync::sync_now(
-        counters,
-        wifi_mgr,
-        alarm_store,
-        todo_store,
-        inbox_store,
-        &mut board.rtc,
+        ctx.counters,
+        ctx.wifi_mgr,
+        ctx.alarm_store,
+        ctx.todo_store,
+        ctx.inbox_store,
+        &mut ctx.board.rtc,
         now,
-        false,
     ) {
         Ok(_) => {
-            log::info!("Automatic periodic sync completed");
-            render_home_now(board, counters, alarm_store, todo_store, inbox_store, clock);
-            if let Err(err) = board.display.refresh_partial(FULL_SCREEN_RECT) {
-                log::warn!("Failed to refresh display after auto sync: {err}");
+            log::info!("Full sync completed");
+            render_home_now(
+                ctx.board,
+                ctx.counters,
+                ctx.alarm_store,
+                ctx.todo_store,
+                ctx.inbox_store,
+                Some(now),
+            );
+            if let Err(err) = ctx.board.display.refresh_partial(FULL_SCREEN_RECT) {
+                log::warn!("Failed to refresh display after sync: {err}");
             }
         }
-        Err(err) => log::warn!("Automatic periodic sync failed: {err}"),
+        Err(err) => log::warn!("Full sync failed: {err}"),
     }
 }
 
@@ -639,25 +639,26 @@ fn ring_alarm_until_dismissed(board: &mut Note4Board) -> Result<()> {
 /// DUE" screen with a short tone burst until ENTER. The reminder date is
 /// recorded *before* the screen so a missed dismiss never re-rings on the
 /// next 30 s check. Runs only while the main loop is idle on Home (menus
-/// block the loop, so this can't interrupt them).
+/// block the loop, so this can't interrupt them). Returns whether a screen
+/// was shown, so the caller can force a full redraw afterwards.
 fn maybe_remind_due_todos(
     board: &mut Note4Board,
     counters: &PersistedCounters,
     todo_store: &TodoStore,
     clock: Option<&DateTime>,
-) {
+) -> bool {
     let Some(now) = clock else {
-        return;
+        return false;
     };
     let date_key = format!("{:04}{:02}{:02}", now.year, now.month, now.day);
     match counters.todo_reminded_date() {
-        Ok(Some(prev)) if prev == date_key => return,
+        Ok(Some(prev)) if prev == date_key => return false,
         Ok(_) => {}
         Err(err) => log::warn!("Failed to read todo reminder date: {err}"),
     }
 
     let Ok(list) = todo_store.load() else {
-        return;
+        return false;
     };
     let due: Vec<&Todo> = list
         .iter()
@@ -674,7 +675,7 @@ fn maybe_remind_due_todos(
         })
         .collect();
     if due.is_empty() {
-        return;
+        return false;
     }
 
     if let Err(err) = counters.set_todo_reminded_date(&date_key) {
@@ -682,6 +683,7 @@ fn maybe_remind_due_todos(
     }
     log::info!("{} high-importance todo(s) due today; reminding", due.len());
     remind_due_todos_screen(board, &due);
+    true
 }
 
 /// Full-screen "TODOS DUE" with up to 7 due items, a short 3-note tone
@@ -725,73 +727,28 @@ fn remind_due_todos_screen(board: &mut Note4Board, due: &[&Todo]) {
     }
 }
 
-/// Long-poll for urgent inbox messages: performs a sync with the long-poll
-/// flag so the server holds the connection until an unread high-priority
-/// message arrives (or its timeout). Keeps the device's Wi-Fi connected for
-/// the hold instead of re-connecting on a timer - both more real-time and
-/// gentler on the radio. Runs while idle on Home (the main loop blocks inside
-/// menus). Only active when Wi-Fi + server are configured.
-fn long_poll_urgent(
-    board: &mut Note4Board,
-    counters: &PersistedCounters,
-    wifi_mgr: &mut wifi::WifiManager,
-    alarm_store: &AlarmStore,
-    todo_store: &TodoStore,
-    inbox_store: &InboxStore,
-    clock: Option<&DateTime>,
-) {
-    let Some(now) = clock else {
-        return;
-    };
-    let server_configured = counters
-        .device_config()
-        .map(|cfg| cfg.is_some())
-        .unwrap_or(false);
-    let wifi_configured = counters
-        .wifi_creds()
-        .map(|creds| creds.is_some())
-        .unwrap_or(false);
-    if !server_configured || !wifi_configured {
-        return;
-    }
-    match sync::sync_now(
-        counters,
-        wifi_mgr,
-        alarm_store,
-        todo_store,
-        inbox_store,
-        &mut board.rtc,
-        now,
-        true,
-    ) {
-        Ok(_) => {
-            log::info!("Long-poll sync completed");
-            render_home_now(board, counters, alarm_store, todo_store, inbox_store, clock);
-            if let Err(err) = board.display.refresh_partial(FULL_SCREEN_RECT) {
-                log::warn!("Failed to refresh display after long-poll sync: {err}");
-            }
-        }
-        Err(err) => log::warn!("Long-poll sync failed: {err}"),
-    }
-}
-
 /// Shows unread urgent (high-priority alert) inbox items as a full-screen
 /// reminder with an insistent tone, marking each read locally so it can't
-/// re-ring. The long-poll sync above fetches them in real time; this renders
-/// them. Runs only while idle on Home.
-fn maybe_remind_urgent_inbox(board: &mut Note4Board, inbox_store: &InboxStore) {
-    let Ok(list) = inbox_store.load() else {
-        return;
+/// re-ring. The urgent poll + full sync above fetch them; this renders them.
+/// Runs only while idle on Home. Returns whether a reminder was shown, so
+/// the caller can force a full redraw afterwards (the reminder's full-screen
+/// render would otherwise leave stale pixels behind).
+fn maybe_remind_urgent_inbox(ctx: &mut DeviceContext) -> bool {
+    let Ok(list) = ctx.inbox_store.load() else {
+        return false;
     };
-    let urgent: Vec<u64> = inbox_store
-        .unread_urgent()
-        .unwrap_or_default();
+    let urgent: Vec<u64> = ctx.inbox_store.unread_urgent().unwrap_or_default();
     if urgent.is_empty() {
-        return;
+        return false;
     }
+    // Mark every urgent item read first. If any persist fails, skip showing
+    // this batch entirely - otherwise a failed write would leave the item
+    // unread and this function would re-ring it on every loop iteration,
+    // looping forever.
     for seq in &urgent {
-        if let Err(err) = inbox_store.mark_read(*seq) {
-            log::warn!("Failed to mark urgent inbox read: {err}");
+        if let Err(err) = ctx.inbox_store.mark_read(*seq) {
+            log::warn!("Failed to mark urgent inbox read; not reminding: {err}");
+            return false;
         }
     }
     let titles: Vec<String> = list
@@ -800,7 +757,8 @@ fn maybe_remind_urgent_inbox(board: &mut Note4Board, inbox_store: &InboxStore) {
         .map(|it| it.title.chars().take(34).collect::<String>())
         .collect();
     log::info!("{} urgent inbox message(s) to show", titles.len());
-    remind_urgent_screen(board, &titles);
+    remind_urgent_screen(ctx.board, &titles);
+    true
 }
 
 /// Full-screen urgent reminder: title(s) with a persistent tone loop until
@@ -821,21 +779,73 @@ fn remind_urgent_screen(board: &mut Note4Board, titles: &[String]) {
     let _ = board.display.refresh_full();
 
     // Persistent tone bursts until dismissed - urgent messages keep beeping,
-    // unlike the normal short alert.
+    // unlike the normal short alert. Crank the DAC volume to max, use a large
+    // sine amplitude, and alternate high/low pitches so the urgent siren is
+    // unmistakably loud and distinct from a plain single tone.
+    //
+    // Dismiss is driven by `is_pressed()` (the button going down), not by the
+    // debounced release event - so a single short tap returns to Home the
+    // moment ENTER goes down, exactly as requested. The siren is played as
+    // short single notes with a tight press-poll window between each one, and
+    // the whole reminder is bounded by a safety timeout so an unattended
+    // device can't ring forever.
+    if let Some(audio) = board.audio.as_mut() {
+        if let Err(err) = audio.set_volume(255) {
+            log::warn!("Urgent volume boost failed: {err}");
+        }
+    }
+    // Two-note siren (F#6/C6) repeated until dismiss.
+    const SIREN: [(f32, f32); 2] = [(1397.0, 0.12), (1046.0, 0.12)];
+    let mut siren_step = 0usize;
+    let ring_start = EspSystemTime {}.now();
     loop {
         watchdog::feed();
-        if let Some(event) = board.key_enter.poll() {
-            if matches!(event, ButtonEvent::Pressed | ButtonEvent::LongPressed) {
+        // Keep the debouncer fed so a press is registered at all
+        // (`is_pressed` only reflects the debounced state that `poll`
+        // advances), and dismiss the moment ENTER is debounced-down,
+        // without waiting for its release.
+        board.key_enter.poll();
+        // Dismiss as soon as ENTER goes down (raw press, no release wait).
+        if board.key_enter.is_pressed() {
+            // Drain the button so its eventual release can't emit a stray
+            // `Pressed` that leaks into the main loop as a spurious action.
+            while board.key_enter.poll().is_some() {}
+            return;
+        }
+        if (EspSystemTime {}).now().saturating_sub(ring_start)
+            >= Duration::from_secs(URGENT_RING_MAX_SECS)
+        {
+            log::warn!("Urgent reminder timed out after {URGENT_RING_MAX_SECS}s");
+            return;
+        }
+        let (freq, dur) = SIREN[siren_step % SIREN.len()];
+        if let Some(audio) = board.audio.as_mut() {
+            if let Err(err) = audio.play_sine_stereo(freq, dur, 24000) {
+                log::warn!("Urgent siren note failed: {err}");
+            }
+        } else {
+            thread::sleep(Duration::from_millis(dur as u64 * 1000));
+        }
+        siren_step += 1;
+        // Tight press-poll window after each note so a press is caught
+        // promptly between siren notes (never during a long blocking play).
+        let poll_deadline = EspSystemTime {}.now() + Duration::from_millis(400);
+        loop {
+            watchdog::feed();
+            board.key_enter.poll();
+            if board.key_enter.is_pressed() {
+                while board.key_enter.poll().is_some() {}
+                return;
+            }
+            let now = EspSystemTime {}.now();
+            if now >= poll_deadline {
                 break;
             }
-        }
-        if let Some(audio) = board.audio.as_mut() {
-            if let Err(err) = audio.play_sine_stereo(1046.0, 0.15, 8000) {
-                log::warn!("Urgent tone playback failed: {err}");
-            }
-            thread::sleep(Duration::from_millis(300));
-        } else {
             thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
         }
     }
 }
+
+/// Safety bound so an unattended urgent reminder can't ring forever and drain
+/// the battery; generous for an urgent alert.
+const URGENT_RING_MAX_SECS: u64 = 120;

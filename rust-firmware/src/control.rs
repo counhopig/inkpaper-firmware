@@ -11,14 +11,10 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::alarms::AlarmStore;
-use crate::board::Note4Board;
-use crate::inbox::InboxStore;
+use crate::ctx::DeviceContext;
 use crate::rtc::DateTime;
-use crate::storage::{DeviceConfig, PersistedCounters, WifiCreds};
+use crate::storage::{DeviceConfig, WifiCreds};
 use crate::sync;
-use crate::todos::TodoStore;
-use crate::wifi;
 
 /// Incoming command from a USB/BLE client.
 #[derive(Debug, Deserialize)]
@@ -92,16 +88,7 @@ pub fn render_reply(reply: &Reply) -> String {
 /// both USB (Phase 4) and BLE (Phase 5) control channels will call into,
 /// so it must remain transport-agnostic. It accesses the board (for
 /// RTC and Wi-Fi state), the stores (for syncing), and the time.
-pub fn dispatch(
-    cmd: Command,
-    board: &mut Note4Board,
-    counters: &PersistedCounters,
-    wifi_mgr: &mut wifi::WifiManager,
-    alarm_store: &AlarmStore,
-    todo_store: &TodoStore,
-    inbox_store: &InboxStore,
-    now: Option<&DateTime>,
-) -> Reply {
+pub fn dispatch(ctx: &mut DeviceContext, cmd: Command, now: Option<&DateTime>) -> Reply {
     match cmd {
         Command::SetWifi { ssid, password } => {
             let creds = WifiCreds { ssid, password };
@@ -111,12 +98,12 @@ pub fn dispatch(
             // connection fails, return an error without persisting. Multiple
             // connects per boot are safe now that `wifi::WifiManager::connect`
             // no longer scans before connecting (see its doc comment).
-            match wifi_mgr.connect(&creds) {
+            match ctx.wifi_mgr.connect(&creds) {
                 Ok(()) => {
                     // Connection succeeded; disconnect (we're not keeping a
                     // persistent connection) and save to NVS.
-                    wifi_mgr.disconnect();
-                    match counters.save_wifi_creds(&creds) {
+                    ctx.wifi_mgr.disconnect();
+                    match ctx.counters.save_wifi_creds(&creds) {
                         Ok(()) => {
                             log::info!("USB control: Wi-Fi credentials saved for '{}'", creds.ssid);
                             Reply::Ok
@@ -146,9 +133,9 @@ pub fn dispatch(
                 server_url: url,
                 auth_token: token,
             };
-            match counters.save_device_config(&cfg) {
+            match ctx.counters.save_device_config(&cfg) {
                 Ok(()) => {
-                    if let Err(err) = counters.clear_sync_etag() {
+                    if let Err(err) = ctx.counters.clear_sync_etag() {
                         log::warn!(
                             "Server config saved but old sync ETag could not be cleared: {err}"
                         );
@@ -177,14 +164,13 @@ pub fn dispatch(
                 };
             };
             match sync::sync_now(
-                counters,
-                wifi_mgr,
-                alarm_store,
-                todo_store,
-                inbox_store,
-                &mut board.rtc,
+                ctx.counters,
+                ctx.wifi_mgr,
+                ctx.alarm_store,
+                ctx.todo_store,
+                ctx.inbox_store,
+                &mut ctx.board.rtc,
                 now_dt,
-                false,
             ) {
                 Ok(sync::SyncOutcome::Applied {
                     alarm_count,
@@ -208,11 +194,13 @@ pub fn dispatch(
 
         Command::GetStatus => {
             // Report whatever we can cheaply check without network activity.
-            let wifi_configured = counters
+            let wifi_configured = ctx
+                .counters
                 .wifi_creds()
                 .map(|opt| opt.is_some())
                 .unwrap_or(false);
-            let server_configured = counters
+            let server_configured = ctx
+                .counters
                 .device_config()
                 .map(|opt| opt.is_some())
                 .unwrap_or(false);
@@ -220,20 +208,22 @@ pub fn dispatch(
             // Report live Wi-Fi connection state plus what is actually
             // stored in NVS. Secrets (Wi-Fi password, server auth token) are
             // never sent back to the client - only whether one is set.
-            let wifi_connected = wifi_mgr.is_connected();
-            let (wifi_ssid, wifi_has_password) = counters
+            let wifi_connected = ctx.wifi_mgr.is_connected();
+            let (wifi_ssid, wifi_has_password) = ctx
+                .counters
                 .wifi_creds()
                 .ok()
                 .flatten()
                 .map(|creds| (Some(creds.ssid), !creds.password.is_empty()))
                 .unwrap_or((None, false));
-            let (server_url, server_has_token) = counters
+            let (server_url, server_has_token) = ctx
+                .counters
                 .device_config()
                 .ok()
                 .flatten()
                 .map(|cfg| (Some(cfg.server_url), !cfg.auth_token.is_empty()))
                 .unwrap_or((None, false));
-            let timezone_offset_minutes = counters.timezone_offset_minutes().unwrap_or(0);
+            let timezone_offset_minutes = ctx.counters.timezone_offset_minutes().unwrap_or(0);
 
             Reply::Status {
                 wifi_configured,
@@ -247,8 +237,8 @@ pub fn dispatch(
             }
         }
 
-        Command::ClearAlarms => match alarm_store.save(&[]) {
-            Ok(()) => match board.rtc.clear_alarm() {
+        Command::ClearAlarms => match ctx.alarm_store.save(&[]) {
+            Ok(()) => match ctx.board.rtc.clear_alarm() {
                 Ok(()) => {
                     log::info!("USB/BLE control: all alarms cleared");
                     Reply::Ok
@@ -268,13 +258,14 @@ pub fn dispatch(
                     message: "Timezone offset must be between -720 and 840 minutes".to_string(),
                 };
             }
-            let old_offset = counters.timezone_offset_minutes().unwrap_or(0);
-            let adjusted = board
+            let old_offset = ctx.counters.timezone_offset_minutes().unwrap_or(0);
+            let adjusted = ctx
+                .board
                 .rtc
                 .read_time()
                 .map(|dt| dt.shifted_minutes((offset_minutes - old_offset) as i32));
-            match counters.save_timezone_offset_minutes(offset_minutes) {
-                Ok(()) => match adjusted.and_then(|dt| board.rtc.write_time(&dt)) {
+            match ctx.counters.save_timezone_offset_minutes(offset_minutes) {
+                Ok(()) => match adjusted.and_then(|dt| ctx.board.rtc.write_time(&dt)) {
                     Ok(()) => Reply::Ok,
                     Err(err) => Reply::Error {
                         message: format!("Timezone saved, but RTC update failed: {err}"),

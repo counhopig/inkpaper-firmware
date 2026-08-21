@@ -87,11 +87,11 @@ struct DeviceTodoState {
 /// server data's counts and new ETag. Any HTTP error, TLS error, or
 /// JSON parse error returns `Err(...)` with a descriptive message rather
 /// than panicking.
+#[allow(clippy::too_many_arguments)]
 pub fn fetch_and_apply(
     server_url: &str,
     token: &str,
     _etag: Option<&str>,
-    long_poll: bool,
     alarm_store: &AlarmStore,
     todo_store: &TodoStore,
     inbox_store: &InboxStore,
@@ -151,13 +151,6 @@ pub fn fetch_and_apply(
     if !token.is_empty() {
         auth_header = format!("Bearer {token}");
         headers.push(("authorization", &auth_header));
-    }
-    // Long-poll: ask the server to hold the connection until an unread
-    // high-priority inbox message arrives (or a timeout). This keeps the
-    // device's Wi-Fi connected and surfaces urgent messages in real time
-    // instead of re-connecting on a timer.
-    if long_poll {
-        headers.push(("x-inkpaper-wait", "1"));
     }
     let mut request = client
         .request(Method::Post, server_url, &headers)
@@ -245,7 +238,6 @@ pub fn sync_now(
     inbox_store: &InboxStore,
     rtc: &mut Pcf8563,
     now: &DateTime,
-    long_poll: bool,
 ) -> Result<SyncOutcome> {
     let creds = counters
         .wifi_creds()
@@ -278,7 +270,6 @@ pub fn sync_now(
         &cfg.server_url,
         &cfg.auth_token,
         etag.as_deref(),
-        long_poll,
         alarm_store,
         todo_store,
         inbox_store,
@@ -308,4 +299,78 @@ pub fn sync_now(
     }
 
     outcome
+}
+
+/// Lightweight urgent-message poll: connects, sends a `POST` with the
+/// `X-Inkpaper-Poll` header, reads a tiny `{"urgent": bool}` response, and
+/// disconnects. The server answers immediately (no hold), so the firmware can
+/// call this on a short timer to detect high-priority messages without
+/// keeping a long connection open or blocking the main loop for long.
+///
+/// Returns `Ok(true)` when the server has an unread high-priority message.
+/// Errors (no Wi-Fi, no server config, network failure) are returned so the
+/// caller can fall back to a regular sync or log.
+pub fn poll_urgent(counters: &PersistedCounters, wifi_mgr: &mut wifi::WifiManager) -> Result<bool> {
+    let creds = counters
+        .wifi_creds()?
+        .ok_or_else(|| anyhow!("Wi-Fi not configured"))?;
+    let cfg = counters
+        .device_config()?
+        .ok_or_else(|| anyhow!("Server not configured"))?;
+
+    wifi_mgr.connect(&creds)?;
+
+    let result = (|| -> Result<bool> {
+        let config = HttpConfiguration {
+            crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
+            ..Default::default()
+        };
+        let mut client = HttpClient::wrap(
+            EspHttpConnection::new(&config)
+                .map_err(|e| anyhow!("HTTP connection setup failed: {e}"))?,
+        );
+        let mut headers: Vec<(&str, &str)> = vec![
+            ("accept", "application/json"),
+            ("content-type", "application/json"),
+            ("x-inkpaper-poll", "1"),
+            ("content-length", "2"),
+        ];
+        let auth_header;
+        if !cfg.auth_token.is_empty() {
+            auth_header = format!("Bearer {}", cfg.auth_token);
+            headers.push(("authorization", &auth_header));
+        }
+        let mut request = client
+            .request(Method::Post, &cfg.server_url, &headers)
+            .map_err(|e| anyhow!("POST {} failed to start: {e}", cfg.server_url))?;
+        let mut written = 0usize;
+        let body = b"{}";
+        while written < body.len() {
+            let count = request
+                .write(&body[written..])
+                .map_err(|e| anyhow!("POST body write failed: {e}"))?;
+            if count == 0 {
+                return Err(anyhow!("POST body write made no progress"));
+            }
+            written += count;
+        }
+        let mut response = request
+            .submit()
+            .map_err(|e| anyhow!("POST {} failed: {e}", cfg.server_url))?;
+        watchdog::feed();
+        if response.status() != 200 {
+            return Err(anyhow!("urgent poll failed: HTTP {}", response.status()));
+        }
+        let mut buf = [0u8; 256];
+        let bytes_read = io::try_read_full(&mut response, &mut buf).map_err(|e| e.0)?;
+        let parsed: serde_json::Value = serde_json::from_slice(&buf[..bytes_read])
+            .map_err(|e| anyhow!("urgent poll JSON decode failed: {e}"))?;
+        Ok(parsed
+            .get("urgent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false))
+    })();
+
+    wifi_mgr.disconnect();
+    result
 }
