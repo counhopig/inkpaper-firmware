@@ -17,6 +17,40 @@ use crate::ui::{
     PickResult,
 };
 
+/// Text column width for list rows: rows start at `ui`'s `LIST_TEXT_X` (50)
+/// and the selection box runs to x=384, so 334px of text fits. With CJK
+/// glyphs now in the 8x16 path a fixed 34-char cap overflowed badly, so
+/// row text is truncated by *measured width* instead of char count.
+pub const LIST_TEXT_MAX_WIDTH: usize = 334;
+
+/// Truncates `text` to fit `max_width` at scale 1 by measured glyph width
+/// (CJK cells are 17px, ASCII is proportional), appending "…" when cut.
+/// Never splits a UTF-8 codepoint (iterates chars).
+pub fn truncate_prop(text: &str, max_width: usize) -> String {
+    let mut width = 0usize;
+    let mut out = String::new();
+    let ellipsis = "…";
+    let ellipsis_w = Canvas::text_prop_width(ellipsis, 1);
+    let mut truncated = false;
+    for c in text.chars() {
+        let w = if crate::font_cjk::is_cjk(c) {
+            crate::font_cjk::WIDTH_16
+        } else {
+            (crate::font8x16::glyph(c).1 as usize) + 1
+        };
+        if width + w + ellipsis_w > max_width {
+            truncated = true;
+            break;
+        }
+        width += w;
+        out.push(c);
+    }
+    if truncated {
+        out.push_str(ellipsis);
+    }
+    out
+}
+
 /// Entry point from Home's ENTER short-press: shows the top-level menu and
 /// recurses into whichever screen the user picks, returning once they back
 /// all the way out to Home. Always leaves the caller (Home) to redraw its
@@ -590,8 +624,66 @@ fn wrap_text_small(text: &str, max_width: usize) -> Vec<String> {
                 continue;
             }
             let mut split = remaining.len();
-            while split > 1 && Canvas::text_small_width(&remaining[..split]) > max_width {
-                split -= 1;
+            while split > 0 && Canvas::text_small_width(&remaining[..split]) > max_width {
+                // Step back to the previous char boundary (CJK is multi-byte).
+                split = remaining[..split]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
+            if split == 0 {
+                // Even one char alone is too wide; emit a single full char
+                // so the loop always makes progress.
+                split = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+            }
+            lines.push(remaining[..split].to_string());
+            remaining = &remaining[split..];
+            if remaining.is_empty() {
+                break;
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Greedy word-wrap measured with the regular 8x16 proportional font
+/// (`Canvas::text_prop_width`) - for detail pages that render body text
+/// at scale 1. Same shape as [`wrap_text_small`]; a single word longer
+/// than `max_width` is hard character-split instead of overflowing.
+fn wrap_text_prop(text: &str, max_width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let mut remaining = word;
+        loop {
+            let candidate = if current.is_empty() {
+                remaining.to_string()
+            } else {
+                format!("{current} {remaining}")
+            };
+            if Canvas::text_prop_width(&candidate, 1) <= max_width {
+                current = candidate;
+                break;
+            }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                continue;
+            }
+            let mut split = remaining.len();
+            while split > 0 && Canvas::text_prop_width(&remaining[..split], 1) > max_width {
+                // Step back to the previous char boundary (CJK is multi-byte).
+                split = remaining[..split]
+                    .char_indices()
+                    .next_back()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
+            if split == 0 {
+                split = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
             }
             lines.push(remaining[..split].to_string());
             remaining = &remaining[split..];
@@ -800,7 +892,7 @@ fn format_alarm_row(alarm: &StoredAlarm) -> String {
         row.push(' ');
         row.push_str(&alarm.label);
     }
-    row.chars().take(34).collect()
+    truncate_prop(&row, LIST_TEXT_MAX_WIDTH)
 }
 
 const WEEKDAY_SHORT: [&str; 7] = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
@@ -894,7 +986,7 @@ fn format_todo_row(todo: &crate::todos::Todo, now: Option<&DateTime>) -> String 
             row.push_str(&weekdays.join(","));
         }
     }
-    row.chars().take(34).collect()
+    truncate_prop(&row, LIST_TEXT_MAX_WIDTH)
 }
 
 fn activate_todo_row(store: &TodoStore, selected: usize) {
@@ -930,7 +1022,7 @@ fn cycle_todo_importance(store: &TodoStore, selected: usize) {
 fn format_inbox_row(item: &InboxItem) -> String {
     let mark = if item.read { "• " } else { "○ " };
     let row = format!("{mark}{}", item.title);
-    row.chars().take(34).collect()
+    truncate_prop(&row, LIST_TEXT_MAX_WIDTH)
 }
 
 fn render_inbox_page(board: &mut Note4Board, store: &InboxStore, selected: usize) {
@@ -962,11 +1054,32 @@ fn open_inbox_item(board: &mut Note4Board, store: &InboxStore, selected: usize) 
     let canvas = board.display.canvas_mut();
     canvas.clear();
     header(canvas, "INBOX");
-    let title: String = item.title.chars().take(34).collect();
-    canvas.draw_text_prop(16, 44, 2, &title);
-    let mut y = 84usize;
-    for line in wrap_text_small(&item.body, 368) {
-        if y + 16 > 280 {
+    // Title: scale 2 when it fits, otherwise wrap to up to two scale-1
+    // lines (CJK cells are full-width, so a char-count cap overflowed
+    // badly). The hairline rule below always clears the title's ink.
+    let title = truncate_prop(&item.title, 340);
+    let mut title_y = 40usize;
+    let mut rule_y = 74usize;
+    let mut body_y = 82usize;
+    if Canvas::text_prop_width(&title, 2) <= 368 {
+        canvas.draw_text_prop(16, title_y, 2, &title);
+    } else {
+        let lines = wrap_text_prop(&title, 368);
+        title_y = 38;
+        for (i, line) in lines.iter().take(2).enumerate() {
+            canvas.draw_text_prop(16, title_y + i * 22, 1, line);
+        }
+        rule_y = 92;
+        body_y = 100;
+    }
+    // Hairline rule under the title separates the headline from the body,
+    // matching the header/card title-band language used everywhere else.
+    // Kept clear of the title's full glyph box (incl. CJK cells) so the
+    // line never cuts through descenders.
+    canvas.fill_rect(16, rule_y, 368, 1, true);
+    let mut y = body_y;
+    for line in wrap_text_prop(&item.body, 368) {
+        if y + 16 > 282 {
             break;
         }
         canvas.draw_text_prop(16, y, 1, &line);

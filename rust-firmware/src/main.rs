@@ -9,6 +9,7 @@ mod ctx;
 mod display;
 mod font5x7;
 mod font8x16;
+mod font_cjk;
 mod home;
 mod icons;
 mod inbox;
@@ -31,7 +32,7 @@ use alarms::AlarmStore;
 use anyhow::Result;
 use board::Note4Board;
 use button::{ButtonEvent, POLL_INTERVAL_MS};
-use canvas::Rect;
+use canvas::{Canvas, Rect};
 use ctx::DeviceContext;
 use esp_idf_svc::systime::EspSystemTime;
 use inbox::InboxStore;
@@ -285,7 +286,17 @@ fn main() -> Result<()> {
 
     let mut status_tick = 0u32;
     let mut clock_tick = 0u32;
-    let mut auto_sync_tick = 0u32;
+    // Cron-style wall-clock alignment: sync decisions fire when the
+    // boundary index *advances*, not when a boot-relative timer elapses -
+    // so "every 30s" means at :00/:30 of each minute and "every 1h" means
+    // at the top of the hour. Initialized to the boot-time boundary so the
+    // first aligned boundary after boot fires (and a never-synced device
+    // syncs on its first urgent-poll boundary).
+    let sync_interval_minutes = ctx.counters.sync_interval_minutes().unwrap_or(60) as u64;
+    let boot_unix = clock.map(|dt| dt.to_unix()).unwrap_or(0);
+    let mut last_urgent_boundary = boot_unix / 30;
+    let mut last_full_boundary = boot_unix / (sync_interval_minutes * 60);
+    let never_synced = ctx.counters.last_sync_epoch().unwrap_or(None).is_none();
     let mut ble_control: Option<ble_control::BleControl> = None;
     loop {
         watchdog::feed();
@@ -311,26 +322,6 @@ fn main() -> Result<()> {
             }
         }
 
-        // Periodic sync check every 30 s (1500 × 20 ms). The check itself is
-        // cheap (two NVS reads). It does two things on separate timers:
-        //   - urgent poll: every cycle, a lightweight poll (short connection,
-        //     server answers immediately) for high-priority inbox messages;
-        //   - full sync: only when the elapsed time since the last one
-        //     exceeds the configured interval (see `screens.rs`'s SYNC
-        //     INTERVAL setting).
-        // The due-todo reminder rides the same cadence - it too must not fire
-        // mid-menu, and this is the only place the main loop is guaranteed
-        // idle. Like the urgent reminder it blocks the loop, so dismissing
-        // it also forces a full redraw.
-        auto_sync_tick += 1;
-        if auto_sync_tick >= 1500 {
-            auto_sync_tick = 0;
-            maybe_auto_sync(&mut ctx, clock.as_ref());
-            if maybe_remind_due_todos(ctx.board, ctx.counters, ctx.todo_store, clock.as_ref()) {
-                dirty.push(FULL_SCREEN_RECT);
-            }
-        }
-
         clock_tick += 1;
         if clock_tick >= CLOCK_POLL_INTERVAL_POLLS {
             clock_tick = 0;
@@ -347,6 +338,25 @@ fn main() -> Result<()> {
                     if changed {
                         clock = Some(dt);
                         dirty.push(CLOCK_RECT);
+                    }
+                    // Cron-style sync decisions ride the fresh clock read
+                    // (every 1.2 s): boundaries only fire once each, aligned
+                    // to wall clock. Both checks are cheap NVS reads unless a
+                    // boundary actually advanced, so this never adds Wi-Fi
+                    // traffic beyond the intended cadence. The due-todo
+                    // reminder shares the urgent-poll cadence (once per 30 s
+                    // boundary, gated once/day anyway). Menus block the loop,
+                    // so nothing fires mid-menu; a boundary crossed while
+                    // blocked just fires on the next read.
+                    maybe_auto_sync(
+                        &mut ctx,
+                        &dt,
+                        &mut last_urgent_boundary,
+                        &mut last_full_boundary,
+                        never_synced,
+                    );
+                    if maybe_remind_due_todos(ctx.board, ctx.counters, ctx.todo_store, Some(&dt)) {
+                        dirty.push(FULL_SCREEN_RECT);
                     }
                 }
                 Err(err) => log::warn!("PCF8563 read_time failed: {err}"),
@@ -481,19 +491,29 @@ fn render_home_now(
     );
 }
 
-/// Periodic sync entry point, called every ~30 s from the main loop. Two
-/// things happen on independent timers:
-///   - An urgent poll every cycle: a lightweight connection (server answers
-///     immediately) checks for high-priority inbox messages. If one is found,
-///     a full sync runs right away to fetch it.
-///   - A full sync when the elapsed time since the last one exceeds the
-///     configured interval (normal content stays on the slow timer).
+/// Cron-style sync entry point, called on every fresh clock read (~1.2 s)
+/// from the main loop. Fires only when a wall-clock *boundary advances*:
+///   - An urgent poll when `unix / 30` advances - i.e. at :00/:30 of each
+///     minute, not on a boot-relative 30 s timer. Lightweight connection,
+///     the server answers immediately; if it reports an unread
+///     high-priority message a full sync runs right away to fetch it.
+///   - A full sync when `unix / (interval*60)` advances - every 1 h fires
+///     at the top of the hour, every 30 m at :00/:30, every 5 m at the
+///     :05 marks, etc. (normal content stays on the slow timer).
 ///
-/// Requires Wi-Fi + server config; failures are logged and retried next cycle.
-fn maybe_auto_sync(ctx: &mut DeviceContext, clock: Option<&DateTime>) {
-    let Some(now) = clock else {
-        return;
-    };
+/// Both checks are cheap NVS reads unless a boundary actually advanced, so
+/// the 1.2 s cadence never adds network traffic.
+///
+/// Requires Wi-Fi + server config; failures are logged and retried at the
+/// next boundary. `never_synced` forces the first full sync on the first
+/// urgent-poll boundary after boot so a fresh device gets content promptly.
+fn maybe_auto_sync(
+    ctx: &mut DeviceContext,
+    now: &DateTime,
+    last_urgent_boundary: &mut u64,
+    last_full_boundary: &mut u64,
+    never_synced: bool,
+) {
     let server_configured = ctx
         .counters
         .device_config()
@@ -510,32 +530,41 @@ fn maybe_auto_sync(ctx: &mut DeviceContext, clock: Option<&DateTime>) {
     if !wifi_configured {
         return;
     }
-
-    // Urgent poll every cycle: short connection, immediate answer. If the
-    // server reports an unread high-priority message, do a full sync now to
-    // pull it in real time.
-    let urgent = sync::poll_urgent(ctx.counters, ctx.wifi_mgr);
-    match urgent {
-        Ok(true) => {
-            log::info!("Urgent message available; syncing");
-            run_full_sync(ctx, now);
-            return;
-        }
-        Ok(false) => {}
-        Err(err) => log::warn!("Urgent poll failed: {err}"),
-    }
-
-    // Full sync only when the configured interval has elapsed.
     let interval = ctx.counters.sync_interval_minutes().unwrap_or(60) as u64;
-    let due = match ctx.counters.last_sync_epoch().unwrap_or(None) {
-        Some(last) => now.to_unix().saturating_sub(last) >= interval * 60,
-        None => true,
-    };
-    if !due {
+    let unix = now.to_unix();
+    let urgent_boundary = unix / 30;
+    let full_boundary = unix / (interval * 60);
+    if urgent_boundary == *last_urgent_boundary && full_boundary == *last_full_boundary {
         return;
     }
-    log::info!("Automatic sync due (interval {interval} min); syncing");
-    run_full_sync(ctx, now);
+
+    // Urgent poll at each 30 s boundary: short connection, immediate
+    // answer. If the server reports an unread high-priority message, do a
+    // full sync now to pull it in real time.
+    let urgent_fired = if urgent_boundary != *last_urgent_boundary {
+        *last_urgent_boundary = urgent_boundary;
+        match sync::poll_urgent(ctx.counters, ctx.wifi_mgr) {
+            Ok(true) => {
+                log::info!("Urgent message available; syncing");
+                run_full_sync(ctx, now);
+                return;
+            }
+            Ok(false) => {}
+            Err(err) => log::warn!("Urgent poll failed: {err}"),
+        }
+        true
+    } else {
+        false
+    };
+
+    // Full sync at each interval boundary. A never-synced device (fresh
+    // flash / wiped NVS) syncs on its first urgent-poll boundary (~30 s
+    // after boot) instead of waiting for the next interval boundary.
+    if full_boundary != *last_full_boundary || (never_synced && urgent_fired) {
+        *last_full_boundary = full_boundary;
+        log::info!("Aligned sync due (interval {interval} min); syncing");
+        run_full_sync(ctx, now);
+    }
 }
 
 /// Runs a full `sync::sync_now` and refreshes the home screen on success.
@@ -604,8 +633,15 @@ const MAX_RING_SECS: u64 = 300;
 fn ring_alarm_until_dismissed(board: &mut Note4Board) -> Result<()> {
     let canvas = board.display.canvas_mut();
     canvas.clear();
-    canvas.draw_text_prop(40, 100, 4, "ALARM");
-    canvas.draw_text_prop(40, 160, 1, "ENTER = DISMISS");
+    // Standard header for consistency; the big ALARM word below carries
+    // the dramatic weight (the header title repeats it deliberately, like
+    // a page whose content states its own subject).
+    ui::header(canvas, "ALARM");
+    let alarm_w = Canvas::text_prop_width("ALARM", 4);
+    canvas.draw_text_prop(200usize.saturating_sub(alarm_w / 2), 92, 4, "ALARM");
+    let hint = "ENTER = DISMISS";
+    let hint_w = Canvas::text_prop_width(hint, 1);
+    canvas.draw_text_prop(200usize.saturating_sub(hint_w / 2), 184, 1, hint);
     let _ = board.display.refresh_full();
 
     let start = EspSystemTime {}.now();
@@ -693,12 +729,14 @@ fn maybe_remind_due_todos(
 fn remind_due_todos_screen(board: &mut Note4Board, due: &[&Todo]) {
     let canvas = board.display.canvas_mut();
     canvas.clear();
-    canvas.draw_text_prop(16, 40, 1, "INKPAPER");
-    canvas.draw_text_prop(16, 60, 2, "TODOS DUE");
+    // Standard page header (brand + title + rule) so every full-screen
+    // alert shares the visual language of the rest of the UI.
+    ui::header(canvas, "TODOS DUE");
     for (i, todo) in due.iter().take(7).enumerate() {
-        // Truncate long text by chars so this can't split a UTF-8 codepoint.
-        let text: String = todo.text.chars().take(38).collect();
-        canvas.draw_text_prop(16, 100 + i * 24, 1, &format!("!! {text}"));
+        // Truncate long text by measured width so a CJK todo can't push
+        // the row off the right edge.
+        let text = screens::truncate_prop(&todo.text, 300);
+        canvas.draw_text_prop(16, 48 + i * 24, 1, &format!("!! {text}"));
     }
     if due.len() > 7 {
         canvas.draw_text_prop(16, 268, 1, "MORE...");
@@ -754,7 +792,7 @@ fn maybe_remind_urgent_inbox(ctx: &mut DeviceContext) -> bool {
     let titles: Vec<String> = list
         .iter()
         .filter(|it| urgent.contains(&it.id))
-        .map(|it| it.title.chars().take(34).collect::<String>())
+        .map(|it| screens::truncate_prop(&it.title, 330))
         .collect();
     log::info!("{} urgent inbox message(s) to show", titles.len());
     remind_urgent_screen(ctx.board, &titles);
@@ -763,14 +801,13 @@ fn maybe_remind_urgent_inbox(ctx: &mut DeviceContext) -> bool {
 
 /// Full-screen urgent reminder: title(s) with a persistent tone loop until
 /// ENTER dismisses it. Distinct from the normal alert by a longer, repeated
-/// tone and a "URGENT" heading so urgent messages are unmistakable.
+/// tone and the "URGENT" page title so urgent messages are unmistakable.
 fn remind_urgent_screen(board: &mut Note4Board, titles: &[String]) {
     let canvas = board.display.canvas_mut();
     canvas.clear();
-    canvas.draw_text_prop(16, 40, 1, "INKPAPER");
-    canvas.draw_text_prop(16, 60, 2, "URGENT");
+    ui::header(canvas, "URGENT");
     for (i, title) in titles.iter().take(4).enumerate() {
-        canvas.draw_text_prop(16, 100 + i * 24, 1, &format!("!! {title}"));
+        canvas.draw_text_prop(16, 48 + i * 24, 1, &format!("!! {title}"));
     }
     if titles.len() > 4 {
         canvas.draw_text_prop(16, 268, 1, "MORE IN INBOX...");

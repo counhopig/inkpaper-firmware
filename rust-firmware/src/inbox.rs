@@ -60,6 +60,15 @@ pub struct InboxItem {
 /// save so a large server inbox can't overflow NVS.
 pub const MAX_ITEMS: usize = 32;
 
+/// Per-item body cap (in chars) applied on save - a single 1000-char
+/// Chinese body serializes to ~3KB and would crowd every other item out of
+/// the NVS blob. The device detail page reads fine with 300 chars.
+const MAX_BODY_CHARS: usize = 300;
+
+/// Headroom left below `BLOB_BUF_LEN` for JSON overhead while trimming
+/// items to the byte budget.
+const BLOB_HEADROOM: usize = 256;
+
 pub struct InboxStore {
     nvs: EspDefaultNvs,
 }
@@ -124,6 +133,27 @@ impl InboxStore {
             if pending.contains(&item.id) {
                 item.read = true;
             }
+        }
+        // NVS blobs are capped at `BLOB_BUF_LEN`, so long bodies and many
+        // items must be trimmed to fit: cut each body to `MAX_BODY_CHARS`,
+        // then drop the *oldest* items (the server sends newest-first) until
+        // the serialized blob fits. At least one item always survives.
+        let budget = BLOB_BUF_LEN.saturating_sub(BLOB_HEADROOM);
+        for item in owned.iter_mut() {
+            if item.body.chars().count() > MAX_BODY_CHARS {
+                item.body = format!(
+                    "{}…",
+                    item.body.chars().take(MAX_BODY_CHARS).collect::<String>()
+                );
+            }
+        }
+        while owned.len() > 1
+            && serde_json::to_vec(&owned)
+                .map(|v| v.len())
+                .unwrap_or(usize::MAX)
+                > budget
+        {
+            owned.pop();
         }
         self.write_blob(KEY_ITEMS, &owned)?;
         self.write_blob(KEY_PENDING, &pending)

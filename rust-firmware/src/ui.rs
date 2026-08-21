@@ -232,8 +232,12 @@ pub fn pick_number(board: &mut Note4Board, title: &str, min: u8, max: u8) -> Opt
             );
             canvas.stroke_rect(box_x, BOX_TOP, box_width, BOX_H, 3);
             canvas.fill_rect(box_x, BOX_TOP, 7, BOX_H, true);
+            // Center the 80px-tall scale-5 digits in the box's leftover
+            // space (right of the accent bar) - pinning them near the top
+            // left dead air under them, unbalanced against the box.
             let value_x = box_x + 7 + (box_width - 7 - number_width) / 2;
-            canvas.draw_text_prop(value_x, BOX_TOP + 10, 5, &label);
+            let value_y = BOX_TOP + (BOX_H.saturating_sub(80)) / 2;
+            canvas.draw_text_prop(value_x, value_y, 5, &label);
             footer(canvas, "UP/DOWN CHANGE   ENTER OK   HOLD ENTER BACK");
             if first_draw {
                 let _ = board.display.refresh_full();

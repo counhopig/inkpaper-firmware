@@ -1,6 +1,7 @@
 //! 1bpp frame buffer and drawing primitives, independent of the EPD driver.
 
 use crate::font8x16;
+use crate::font_cjk;
 
 pub const WIDTH: usize = 400;
 pub const HEIGHT: usize = 300;
@@ -106,9 +107,28 @@ impl Canvas {
 
     /// Draws text with the tiny 5x7 font (`font5x7.rs`) at scale 1. Used for
     /// dense columnar layouts (week view) where 16px type is too tall.
+    /// CJK characters render with the 12x12 GB2312 font instead, advancing
+    /// a fixed cell width.
     pub fn draw_text_small(&mut self, x: usize, y: usize, text: &str) -> usize {
         let mut cursor = x;
         for character in text.chars() {
+            if let Some(glyph) = font_cjk::glyph12(character) {
+                for row in 0..12usize {
+                    let (hi, lo) = (glyph[row * 2], glyph[row * 2 + 1]);
+                    for column in 0..12usize {
+                        let bit = if column < 8 {
+                            hi >> (7 - column) & 1
+                        } else {
+                            lo >> (15 - column) & 1
+                        };
+                        if bit != 0 {
+                            self.set_pixel(cursor + column, y + row, true);
+                        }
+                    }
+                }
+                cursor += font_cjk::WIDTH_12;
+                continue;
+            }
             let (rows, width) = crate::font5x7::glyph5x7(character);
             for (row, bits) in rows.iter().enumerate() {
                 for column in 0..width as usize {
@@ -126,7 +146,13 @@ impl Canvas {
     /// [`Canvas::draw_text_small`], without drawing anything.
     pub fn text_small_width(text: &str) -> usize {
         text.chars()
-            .map(|c| (crate::font5x7::glyph5x7(c).1 as usize) + 1)
+            .map(|c| {
+                if font_cjk::is_cjk(c) {
+                    font_cjk::WIDTH_12
+                } else {
+                    (crate::font5x7::glyph5x7(c).1 as usize) + 1
+                }
+            })
             .sum()
     }
 
@@ -135,7 +161,13 @@ impl Canvas {
     /// before the content is known to fit.
     pub fn text_prop_width(text: &str, scale: usize) -> usize {
         text.chars()
-            .map(|c| (font8x16::glyph(c).1 as usize + 1) * scale)
+            .map(|c| {
+                if font_cjk::is_cjk(c) {
+                    font_cjk::WIDTH_16 * scale
+                } else {
+                    (font8x16::glyph(c).1 as usize + 1) * scale
+                }
+            })
             .sum()
     }
 
@@ -149,6 +181,31 @@ impl Canvas {
     ) -> usize {
         let mut cursor = x;
         for character in text.chars() {
+            // CJK characters use the fixed 16x16 GB2312 cell: a solid
+            // block, 16 rows of 16 bits (2 bytes per row, MSB first).
+            if let Some(glyph) = font_cjk::glyph16(character) {
+                for (row, bytes) in glyph.chunks_exact(2).enumerate() {
+                    let (hi, lo) = (bytes[0], bytes[1]);
+                    for column in 0..16usize {
+                        let bit = if column < 8 {
+                            hi >> (7 - column) & 1
+                        } else {
+                            lo >> (15 - column) & 1
+                        };
+                        if bit != 0 {
+                            self.fill_rect(
+                                cursor + column * scale,
+                                y + row * scale,
+                                scale,
+                                scale,
+                                black,
+                            );
+                        }
+                    }
+                }
+                cursor += font_cjk::WIDTH_16 * scale;
+                continue;
+            }
             let (rows, width) = font8x16::glyph(character);
             for (row, bits) in rows.iter().enumerate() {
                 for column in 0..width as usize {

@@ -12,6 +12,9 @@ mod canvas;
 #[path = "../../../rust-firmware/src/font8x16.rs"]
 mod font8x16;
 
+#[path = "../../../rust-firmware/src/font_cjk.rs"]
+mod font_cjk;
+
 #[path = "../../../rust-firmware/src/font5x7.rs"]
 mod font5x7;
 
@@ -180,7 +183,7 @@ fn main() {
     c.draw_text_prop((400usize.saturating_sub(cap_w)) / 2, 87, 1, "CHOOSE VALUE");
     c.stroke_rect(box_x, 123, box_w, 120, 3);
     c.fill_rect(box_x, 123, 7, 120, true);
-    c.draw_text_prop(box_x + 7 + (box_w - 7 - nw) / 2, 133, 5, label);
+    c.draw_text_prop(box_x + 7 + (box_w - 7 - nw) / 2, 143, 5, label);
     save("page-number.png", &c);
 
     // GO TO navigation drawer: overlaid on the home screen, with a thick
@@ -273,9 +276,52 @@ fn main() {
                     continue;
                 }
                 let mut split = remaining.len();
-                while split > 1 && canvas::Canvas::text_small_width(&remaining[..split]) > max_width
+                while split > 0 && canvas::Canvas::text_small_width(&remaining[..split]) > max_width
                 {
-                    split -= 1;
+                    split = remaining[..split].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+                }
+                if split == 0 {
+                    split = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                }
+                lines.push(remaining[..split].to_string());
+                remaining = &remaining[split..];
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
+
+    fn wrap_text_prop(text: &str, max_width: usize) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut current = String::new();
+        for word in text.split_whitespace() {
+            let mut remaining = word;
+            loop {
+                let candidate = if current.is_empty() {
+                    remaining.to_string()
+                } else {
+                    format!("{current} {remaining}")
+                };
+                if canvas::Canvas::text_prop_width(&candidate, 1) <= max_width {
+                    current = candidate;
+                    break;
+                }
+                if !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                    continue;
+                }
+                let mut split = remaining.len();
+                while split > 0 && canvas::Canvas::text_prop_width(&remaining[..split], 1) > max_width
+                {
+                    split = remaining[..split].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+                }
+                if split == 0 {
+                    split = remaining.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
                 }
                 lines.push(remaining[..split].to_string());
                 remaining = &remaining[split..];
@@ -429,19 +475,87 @@ fn main() {
     }
     save("inbox.png", &c);
 
+    // CJK rendering check: mixed Chinese + ASCII text (mirrors the
+    // notification titles/bodies the pipeline sends).
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "通知");
+    c.draw_text_prop(16, 40, 2, "完成 · inkpaper-workspace");
+    c.fill_rect(16, 74, 368, 1, true);
+    let body = "opencode 已完成任务，详情：child_process 修复完成，中文渲染测试通过。This is an ASCII suffix.";
+    let mut yy = 82usize;
+    for line in wrap_text_prop(body, 368) {
+        if yy + 16 > 282 {
+            break;
+        }
+        c.draw_text_prop(16, yy, 1, &line);
+        yy += 18;
+    }
+    c.draw_text_prop(16, 268, 1, "ENTER = 关闭");
+    save("cjk-detail.png", &c);
+
+    // URGENT full-screen reminder (mirrors main.rs remind_urgent_screen).
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "URGENT");
+    let urgent_titles = ["MCP URGENT", "Build failed", "Deploy rollback"];
+    for (i, t) in urgent_titles.iter().enumerate() {
+        c.draw_text_prop(16, 48 + i * 24, 1, &format!("!! {t}"));
+    }
+    c.draw_text_prop(16, 284, 1, "ENTER = DISMISS");
+    save("urgent.png", &c);
+
+    // ALARM ring screen (mirrors main.rs ring_alarm_until_dismissed).
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "ALARM");
+    let alarm_w = canvas::Canvas::text_prop_width("ALARM", 4);
+    c.draw_text_prop(200usize.saturating_sub(alarm_w / 2), 92, 4, "ALARM");
+    let hint = "ENTER = DISMISS";
+    let hint_w = canvas::Canvas::text_prop_width(hint, 1);
+    c.draw_text_prop(200usize.saturating_sub(hint_w / 2), 184, 1, hint);
+    save("alarm-ring.png", &c);
+
     // INBOX item detail with wrapped body.
     let mut c = Canvas::new();
     c.clear();
     header(&mut c, "INBOX");
-    c.draw_text_prop(16, 44, 2, "Build failed");
+    c.draw_text_prop(16, 40, 2, "Build failed");
+    c.fill_rect(16, 74, 368, 1, true);
     let body = "main / test-linux — the integration suite timed out after 45 minutes. Check the runner logs for the exact failing test.";
-    let mut yy = 84usize;
-    for line in wrap_text_small(body, 368) {
-        if yy + 16 > 280 {
+    let mut yy = 82usize;
+    for line in wrap_text_prop(body, 368) {
+        if yy + 16 > 282 {
             break;
         }
         c.draw_text_prop(16, yy, 1, &line);
         yy += 18;
     }
     save("inbox-detail.png", &c);
+
+    // CJK long-title detail: wraps to two scale-1 lines instead of
+    // overflowing (mirrors open_inbox_item's title fitting).
+    let mut c = Canvas::new();
+    c.clear();
+    header(&mut c, "通知");
+    let title = "完成 · inkpaper-workspace 的超长中文标题测试";
+    if canvas::Canvas::text_prop_width(title, 2) <= 368 {
+        c.draw_text_prop(16, 40, 2, title);
+    } else {
+        let lines = wrap_text_prop(title, 368);
+        for (i, line) in lines.iter().take(2).enumerate() {
+            c.draw_text_prop(16, 38 + i * 22, 1, line);
+        }
+    }
+    c.fill_rect(16, 92, 368, 1, true);
+    let body = "长标题会自动换行到两行，分隔线保持在标题下方，正文正常排版。";
+    let mut yy = 100usize;
+    for line in wrap_text_prop(body, 368) {
+        if yy + 16 > 282 {
+            break;
+        }
+        c.draw_text_prop(16, yy, 1, &line);
+        yy += 18;
+    }
+    save("cjk-long-title.png", &c);
 }
