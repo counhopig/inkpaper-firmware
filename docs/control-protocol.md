@@ -1,6 +1,6 @@
 # Control Protocol (USB/BLE)
 
-This document specifies the command protocol for configuring the inkpaper firmware
+This document specifies the command protocol for configuring the inkwash firmware
 over USB serial or BLE control channels. Transport-specific details (USB framing,
 BLE characteristics) are handled by the transport layer; this document describes
 the command/reply schema that both transports implement.
@@ -169,43 +169,43 @@ ordinary `log::info!`/`log::warn!` messages, each is prefixed with a sentinel:
 
 **Command frame (PC → device):**
 ```
->>IP <JSON_COMMAND>\n
+>>IW <JSON_COMMAND>\n
 ```
 
 **Reply frame (device → PC):**
 ```
-<<IP <JSON_REPLY>\n
+<<IW <JSON_REPLY>\n
 ```
 
-The `>>IP ` and `<<IP ` prefixes (with trailing space) are literal and required.
-Any line not starting with `>>IP ` is treated as log output and ignored by the
+The `>>IW ` and `<<IW ` prefixes (with trailing space) are literal and required.
+Any line not starting with `>>IW ` is treated as log output and ignored by the
 reader.
 
 ### Example USB Session
 
 ```
 # Device boots and logs
-[INFO] Inkpaper NOTE4 Rust bring-up starting
+[INFO] Inkwash NOTE4 Rust bring-up starting
 [INFO] Power latch is high; rendering home screen
 
 # PC sends a command (e.g., set Wi-Fi credentials)
->>IP {"cmd":"set_wifi","ssid":"<ssid>","password":"<password>"}
+>>IW {"cmd":"set_wifi","ssid":"<ssid>","password":"<password>"}
 
 # Device logs internal operations
 [INFO] USB control: Wi-Fi credentials saved for '<ssid>'
 
 # Device sends reply
-<<IP {"status":"ok"}
+<<IW {"status":"ok"}
 
 # PC sends another command
->>IP {"cmd":"sync_now"}
+>>IW {"cmd":"sync_now"}
 
 [INFO] USB control sync completed: 3 alarms, 5 todos
-<<IP {"status":"ok"}
+<<IW {"status":"ok"}
 
 # PC queries device status
->>IP {"cmd":"get_status"}
-<<IP {"status":"status","wifi_configured":true,"server_configured":true,"wifi_connected":false,"wifi_ssid":"MySSID","wifi_has_password":true,"server_url":"http://192.168.1.10:8080/api/sync","server_has_token":true,"timezone_offset_minutes":480}
+>>IW {"cmd":"get_status"}
+<<IW {"status":"status","wifi_configured":true,"server_configured":true,"wifi_connected":false,"wifi_ssid":"MySSID","wifi_has_password":true,"server_url":"http://192.168.1.10:8080/api/sync","server_has_token":true,"timezone_offset_minutes":480}
 ```
 
 ---
@@ -234,7 +234,7 @@ notifications are already message-delimited at the link layer).
 
 ### Example BLE Session
 
-1. PC tool discovers the Inkpaper service (`d2c25e50-5e22-48d8-a8b3-34f2f8e2c7d4`).
+1. PC tool discovers the Inkwash service (`d2c25e50-5e22-48d8-a8b3-34f2f8e2c7d4`).
 2. PC tool enables notifications on the reply characteristic.
 3. PC tool writes a command to the command characteristic:
    ```

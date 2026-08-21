@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::alarms::Repeat;
 
-const NAMESPACE: &str = "inkpaper_todo";
+const NAMESPACE: &str = "inkwash_todo";
 const KEY_TODOS: &str = "todos";
 /// Locally-changed `local_id`s pending upload (two-way sync dirty set).
 const KEY_DIRTY: &str = "dirty";

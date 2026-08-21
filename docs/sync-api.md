@@ -1,7 +1,7 @@
 # Sync API Contract
 
-This document specifies the HTTP contract between the inkpaper firmware and the
-`inkpaper-server` backend service. The firmware uses this endpoint for
+This document specifies the HTTP contract between the inkwash firmware and the
+`inkwash-server` backend service. The firmware uses this endpoint for
 bidirectional synchronization of server-hosted alarms and todos.
 
 ## Request
@@ -179,7 +179,7 @@ items than it could fit in this response.
 
 #### Lightweight urgent poll
 
-The device may include an `X-Inkpaper-Poll: 1` header on `POST /api/sync`
+The device may include an `X-Inkwash-Poll: 1` header on `POST /api/sync`
 (with an empty `{}` body). The server answers **immediately** with a tiny
 `{"urgent": true|false}` response - it does not hold the connection, does not
 merge device state, and does not return the full payload. The firmware calls

@@ -59,7 +59,7 @@ pub fn header(canvas: &mut Canvas, title: &str) {
     // Same brand block as the home screen: ink square mark + wordmark.
     canvas.stroke_rect(16, 9, 14, 14, 2);
     canvas.fill_rect(21, 14, 4, 4, true);
-    canvas.draw_text_prop(38, 8, 1, "INKPAPER");
+    canvas.draw_text_prop(38, 8, 1, "INKWASH");
     let width = Canvas::text_prop_width(title, 1);
     canvas.draw_text_prop(384usize.saturating_sub(width), 8, 1, title);
     canvas.fill_rect(16, 29, 368, 1, true);

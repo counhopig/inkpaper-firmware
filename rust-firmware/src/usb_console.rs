@@ -3,17 +3,17 @@
 //!
 //! Commands and log output share the same USB serial port. To avoid colliding
 //! with `log::info!`/`log::warn!` output, commands are framed with a sentinel
-//! prefix `>>IP ` (note the trailing space). Each call to `poll_command()`
+//! prefix `>>IW ` (note the trailing space). Each call to `poll_command()`
 //! does a single non-blocking `read()` of whatever bytes are currently
 //! available, splits them into `\n`-terminated lines, and parses every line
-//! that starts with `>>IP ` into a `Command`. Since one read can contain more
+//! that starts with `>>IW ` into a `Command`. Since one read can contain more
 //! than one complete command (e.g. two commands sent back-to-back land in the
 //! same read), parsed commands are queued in `pending` and drained one per
 //! `poll_command()` call — the whole read buffer is always fully consumed,
 //! so no command is ever silently dropped because it shared a read with
 //! another one.
 //!
-//! Replies are written back to stdout with the `<<IP ` prefix to distinguish
+//! Replies are written back to stdout with the `<<IW ` prefix to distinguish
 //! them as control output (not ordinary logs).
 //!
 //! This design avoids the complexity of raw fcntl/termios manipulation on the
@@ -26,11 +26,11 @@ use std::io::Read;
 
 /// Prefix that marks an incoming line as a command, not a log message.
 /// Must exactly match what the PC tool sends.
-const COMMAND_PREFIX: &str = ">>IP ";
+const COMMAND_PREFIX: &str = ">>IW ";
 
 /// Prefix for outgoing replies, so the PC tool can distinguish control
 /// responses from ordinary log output.
-const REPLY_PREFIX: &str = "<<IP ";
+const REPLY_PREFIX: &str = "<<IW ";
 
 /// Reader state. USB Serial/JTAG stdin is non-blocking, so the main loop can
 /// drain it directly without a second FreeRTOS task competing with Wi-Fi on
@@ -39,7 +39,7 @@ pub struct UsbConsole {
     line_buf: Vec<u8>,
     /// Commands already parsed out of a previous read but not yet returned
     /// to the caller. A single 128-byte read can contain more than one
-    /// complete `>>IP ...\n` line; every one of them is parsed here so none
+    /// complete `>>IW ...\n` line; every one of them is parsed here so none
     /// are lost, and `poll_command()` hands them out one at a time.
     pending: VecDeque<control::Command>,
 }
@@ -96,7 +96,7 @@ impl UsbConsole {
     }
 }
 
-/// Write a reply back to the PC tool, framed with the `<<IP ` prefix.
+/// Write a reply back to the PC tool, framed with the `<<IW ` prefix.
 /// This should be called from the main loop after dispatching a command.
 pub fn write_reply(reply: &control::Reply) {
     let json = control::render_reply(reply);

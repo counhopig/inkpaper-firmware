@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 
-const NAMESPACE: &str = "inkpaper";
+const NAMESPACE: &str = "inkwash";
 const KEY_WIFI_SSID: &str = "wifi_ssid";
 const KEY_WIFI_PASS: &str = "wifi_pass";
 const KEY_SERVER_URL: &str = "server_url";

@@ -855,8 +855,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "inkpaper-note4"
-version = "0.3.0"
+name = "inkwash-note4"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "embedded-svc",

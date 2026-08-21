@@ -3,13 +3,13 @@
 **Generated:** 2026-08-16 · **Updated:** 2026-08-20 · **Commit:** f41555b · **Branch:** main
 
 ## OVERVIEW
-Self-developed firmware repository for the ZECTRIX NOTE4 black-and-white display edition (ESP32-S3-WROOM-1 N16R8, 4.2" 400×300 SSD2683 EPD). A single Rust crate (`rust-firmware/`) built with ESP-IDF 5.5.5 and the `esp` Xtensa toolchain, implementing calendar/offline alarms/todos + HTTPS sync + USB/BLE configuration channels. One of a three-repository system (`../inkpaper-desktop` PC tool, `../inkpaper-server` backend, each an independent repository). Design principle: the device does not author content — the configuration channel only delivers Wi-Fi credentials/server address + token, content is pulled as structured JSON, and alarms ring offline.
+Self-developed firmware repository for the ZECTRIX NOTE4 black-and-white display edition (ESP32-S3-WROOM-1 N16R8, 4.2" 400×300 SSD2683 EPD). A single Rust crate (`rust-firmware/`) built with ESP-IDF 5.5.5 and the `esp` Xtensa toolchain, implementing calendar/offline alarms/todos + HTTPS sync + USB/BLE configuration channels. One of a three-repository system (`../inkwash-desktop` PC tool, `../inkwash-server` backend, each an independent repository). Design principle: the device does not author content — the configuration channel only delivers Wi-Fi credentials/server address + token, content is pulled as structured JSON, and alarms ring offline.
 
 ## STRUCTURE
 ```
-inkpaper/
+inkwash/
 ├── docs/            # All documentation: development guide (must read), hardware spec, two cross-repo protocol contracts, roadmap/investigation records
-├── rust-firmware/   # The only product code: inkpaper-note4 crate (21 flat src modules ~4.3k LOC + C++ EPD component)
+├── rust-firmware/   # The only product code: inkwash-note4 crate (21 flat src modules ~4.3k LOC + C++ EPD component)
 ├── scripts/         # Build/flash/provisioning scripts (.sh=Linux, .ps1=Windows twin, +1 Python provisioning)
 ├── vendor/          # vendored esp-idf-hal 0.46.2 + sdmmc patch (third-party, read-only, see UNIQUE STYLES)
 └── backups/         # factory 16MB flash backup (gitignored, device-unique and contains credentials — never commit)
@@ -22,8 +22,8 @@ No root Cargo.toml, no workspace, no CI, no LICENSE. `.omo/` and `.claude/` are 
 | Changing any firmware behavior | `rust-firmware/src/` | Module responsibility table in `rust-firmware/AGENTS.md` |
 | Environment/build/flash/troubleshooting | `docs/development-guide.md` | Must read; includes a "Safety matters (non-negotiable)" section |
 | GPIO/power rails/EPD data format | `docs/note4-hardware.md` | Authoritative source for board-level hardware |
-| USB/BLE command protocol | `docs/control-protocol.md` | Contract with inkpaper-desktop |
-| HTTP sync protocol | `docs/sync-api.md` | Contract with inkpaper-server |
+| USB/BLE command protocol | `docs/control-protocol.md` | Contract with inkwash-desktop |
+| HTTP sync protocol | `docs/sync-api.md` | Contract with inkwash-server |
 | Wi-Fi connection history and scan culprit investigation | `rust-firmware/src/wifi.rs` (`WifiManager` doc comments) | Complete reasoning chain and root cause of the second-connection crash (resolved); code-level summary in `rust-firmware/AGENTS.md` |
 | On-device verification status / cross-repo progress | `docs/project-status.md` | Contains a "not yet verified on device" checklist |
 
@@ -69,23 +69,23 @@ cargo +esp fmt --manifest-path rust-firmware/Cargo.toml -- --check   # pre-commi
 ./scripts/build-rust.sh && cd rust-firmware && cargo clippy   # clippy with zero warnings (needs IDF env; can reuse build-rust.sh's exports)
 espflash flash --port /dev/tty.usbmodem1101 --chip esp32s3 --flash-size 16mb \
   --flash-mode dio --flash-freq 80mhz --partition-table rust-firmware/partitions.csv \
-  rust-firmware/target/xtensa-esp32s3-espidf/release/inkpaper-note4  # flash (macOS port name; Linux is /dev/ttyACM0)
+  rust-firmware/target/xtensa-esp32s3-espidf/release/inkwash-note4  # flash (macOS port name; Linux is /dev/ttyACM0)
 espflash monitor --port /dev/tty.usbmodem1101     # serial logs (the only "testing" means)
 ```
 
 ## RELEASES
-Firmware releases are built **locally** — a full ESP-IDF toolchain is impractical on CI — and published with `scripts/release.sh <tag>` (e.g. `./scripts/release.sh v0.3.0`). It builds the release ELF, tags (only if the tag doesn't already exist), pushes the tag to `origin` + `github`, then creates a **published** (non-draft) GitHub Release on `counhopig/inkpaper-firmware` via `gh`.
+Firmware releases are built **locally** — a full ESP-IDF toolchain is impractical on CI — and published with `scripts/release.sh <tag>` (e.g. `./scripts/release.sh v0.3.0`). It builds the release ELF, tags (only if the tag doesn't already exist), pushes the tag to `origin` + `github`, then creates a **published** (non-draft) GitHub Release on `counhopig/inkwash-firmware` via `gh`.
 
 - **Critical:** `release.sh` builds the **local working tree** but tags whatever commit is checked out, and it **reuses an existing tag** without moving it. So before releasing, make sure `git status` is clean and the intended commit is checked out — otherwise the binary and the tag can disagree (e.g. re-running `release.sh v0.3.0` after moving that tag attaches the new build to the old tag's commit). To re-release a version that already has a tag, delete the old tag + release first:
   ```bash
-  gh release delete v0.1.0 --repo counhopig/inkpaper-firmware --yes
+  gh release delete v0.1.0 --repo counhopig/inkwash-firmware --yes
   git push origin  :refs/tags/v0.1.0
   git push github  :refs/tags/v0.1.0
   git tag -f v0.1.0 <intended-commit>
   git push origin v0.1.0 && git push github v0.1.0
   ./scripts/release.sh v0.1.0
   ```
-- Release check: `gh release view v0.3.0 --repo counhopig/inkpaper-firmware --json isDraft,assets` (expect `isDraft: false` and the `inkpaper-note4` firmware asset).
+- Release check: `gh release view v0.3.0 --repo counhopig/inkwash-firmware --json isDraft,assets` (expect `isDraft: false` and the `inkwash-note4` firmware asset).
 
 ## NOTES
 - `rust-firmware/.cargo/config.toml` contains machine-specific paths (`IDF_PATH=~/esp/esp-idf`, `LIBCLANG_PATH` pointing at this machine's espup esp-clang) — must be edited manually when switching machines or toolchain versions.

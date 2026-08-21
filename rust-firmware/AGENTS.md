@@ -1,7 +1,7 @@
-# rust-firmware — inkpaper-note4 crate
+# rust-firmware — inkwash-note4 crate
 
 ## OVERVIEW
-The single crate containing all product code: ESP32-S3 firmware with 21 flat src modules (no subdirectories, including `main.rs`) + 1 C++ EPD FFI component. Entry point `src/main.rs:85` (`[[bin]] inkpaper-note4`).
+The single crate containing all product code: ESP32-S3 firmware with 21 flat src modules (no subdirectories, including `main.rs`) + 1 C++ EPD FFI component. Entry point `src/main.rs:85` (`[[bin]] inkwash-note4`).
 
 ## MODULE MAP (src/)
 | Group | Module | Responsibility |
@@ -14,7 +14,7 @@ The single crate containing all product code: ESP32-S3 firmware with 21 flat src
 | Rendering | `canvas.rs` / `font8x16.rs` / `home.rs` / `display.rs` | 1bpp framebuffer + stroke_rect outline; proportional-width glyphs; **pure home-screen layout (no EPD FFI, PC-previewable via `tools/preview`)**; EPD FFI wrapper + `render_home` delegation |
 | UI | `ui.rs` / `screens.rs` | 3-button generic components (list selection, nav drawer); nav drawer/calendar/alarms/todos/settings menu (entered via long-press UP/DOWN, no on-device text input). `ui::header` carries the home screen's ink-square brand block; `pick_from_list` returns `PickResult::{Selected,Cancelled,OpenNav}` so long-press UP/DOWN opens the GO TO drawer from Settings too. |
 | Services | `alarms.rs` / `todos.rs` / `storage.rs` | NVS store; alarms picks the soonest one to arm PCF8563 |
-| Protocol | `control.rs` / `usb_console.rs` / `ble_control.rs` / `sync.rs` / `wifi.rs` | `>>IP `/`<<IP ` command protocol (USB/BLE share `control::dispatch`); HTTPS sync; WifiManager |
+| Protocol | `control.rs` / `usb_console.rs` / `ble_control.rs` / `sync.rs` / `wifi.rs` | `>>IW `/`<<IW ` command protocol (USB/BLE share `control::dispatch`); HTTPS sync; WifiManager |
 
 ## FFI COMPONENT: components/zectrix_epd/
 Official SSD2683 C++ driver (784 LOC `.cc`), generating the `zectrix_epd` module via Cargo.toml `extra_components` + bindgen. `private_include/ssd2683_waveform.h` is calibrated waveform data, **must not be deleted**. EPD power/timing must only go through the `zectrix_epd_power_on/off` FFI (`display.rs:92-136`).

@@ -1,4 +1,4 @@
-//! HTTPS sync client for pulling alarms and todos from the inkpaper-server
+//! HTTPS sync client for pulling alarms and todos from the inkwash-server
 //! (contract: `docs/sync-api.md`).
 //!
 //! `fetch_and_apply` handles conditional requests via `If-None-Match`/ETag,
@@ -387,7 +387,7 @@ pub fn poll_urgent(counters: &PersistedCounters, wifi_mgr: &mut wifi::WifiManage
         let mut headers: Vec<(&str, &str)> = vec![
             ("accept", "application/json"),
             ("content-type", "application/json"),
-            ("x-inkpaper-poll", "1"),
+            ("x-inkwash-poll", "1"),
             ("content-length", "2"),
         ];
         let auth_header;

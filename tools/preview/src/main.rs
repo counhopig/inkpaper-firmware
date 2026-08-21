@@ -149,7 +149,7 @@ fn main() {
     fn header(canvas: &mut Canvas, title: &str) {
         canvas.stroke_rect(16, 9, 14, 14, 2);
         canvas.fill_rect(21, 14, 4, 4, true);
-        canvas.draw_text_prop(38, 8, 1, "INKPAPER");
+        canvas.draw_text_prop(38, 8, 1, "INKWASH");
         let width = canvas::Canvas::text_prop_width(title, 1);
         canvas.draw_text_prop(384usize.saturating_sub(width), 8, 1, title);
         canvas.fill_rect(16, 29, 368, 1, true);
@@ -480,7 +480,7 @@ fn main() {
     let mut c = Canvas::new();
     c.clear();
     header(&mut c, "通知");
-    c.draw_text_prop(16, 40, 2, "完成 · inkpaper-workspace");
+    c.draw_text_prop(16, 40, 2, "完成 · inkwash-workspace");
     c.fill_rect(16, 74, 368, 1, true);
     let body = "opencode 已完成任务，详情：child_process 修复完成，中文渲染测试通过。This is an ASCII suffix.";
     let mut yy = 82usize;
@@ -538,7 +538,7 @@ fn main() {
     let mut c = Canvas::new();
     c.clear();
     header(&mut c, "通知");
-    let title = "完成 · inkpaper-workspace 的超长中文标题测试";
+    let title = "完成 · inkwash-workspace 的超长中文标题测试";
     if canvas::Canvas::text_prop_width(title, 2) <= 368 {
         c.draw_text_prop(16, 40, 2, title);
     } else {

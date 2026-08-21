@@ -21,8 +21,8 @@ if [[ "$TAG" != v* ]]; then
     exit 1
 fi
 
-REPO="counhopig/inkpaper-firmware"
-ELF="rust-firmware/target/xtensa-esp32s3-espidf/release/inkpaper-note4"
+REPO="counhopig/inkwash-firmware"
+ELF="rust-firmware/target/xtensa-esp32s3-espidf/release/inkwash-note4"
 
 echo "==> Building release firmware..."
 ./scripts/build-rust.sh --release
@@ -30,7 +30,7 @@ test -f "$ELF" || { echo "expected firmware not found at $ELF" >&2; exit 1; }
 
 echo "==> Tagging $TAG"
 if ! git rev-parse "$TAG" >/dev/null 2>&1; then
-    git tag -a "$TAG" -m "inkpaper-firmware $TAG"
+    git tag -a "$TAG" -m "inkwash-firmware $TAG"
 fi
 
 echo "==> Pushing tag to origin and github"
@@ -40,13 +40,13 @@ git push github "$TAG" 2>/dev/null || true
 echo "==> Creating GitHub Release and uploading firmware"
 gh release create "$TAG" "$ELF" \
     --repo "$REPO" \
-    --title "Inkpaper Firmware $TAG" \
+    --title "Inkwash Firmware $TAG" \
     --notes "Firmware for the Zectrix Note 4 e-paper device. Flash with:
 
 \`\`\`bash
 espflash flash --chip esp32s3 --flash-size 16mb --flash-mode dio --flash-freq 80mhz \\
   --partition-table rust-firmware/partitions.csv --non-interactive \\
-  inkpaper-note4
+  inkwash-note4
 \`\`\`
 " || gh release upload "$TAG" "$ELF" --repo "$REPO" --clobber
 

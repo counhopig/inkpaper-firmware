@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::rtc::{is_leap, AlarmRegs, DateTime, Pcf8563};
 
-const NAMESPACE: &str = "inkpaper_alrm";
+const NAMESPACE: &str = "inkwash_alrm";
 const KEY_ALARMS: &str = "alarms";
 /// Locally-changed `local_id`s pending upload (two-way sync dirty set).
 const KEY_DIRTY: &str = "dirty";

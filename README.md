@@ -1,4 +1,4 @@
-# Inkpaper — e-ink calendar, alarms & todos for the Zectrix Note 4
+# Inkwash — e-ink calendar, alarms & todos for the Zectrix Note 4
 
 A complete **offline-first calendar / alarm / todo experience** built for the
 [**Zectrix Note 4**](https://zectrix.com) — the 4.2″ 400×300 e-paper
@@ -42,17 +42,17 @@ content from the server.
 
 ```mermaid
 flowchart LR
-    D["inkpaper-firmware<br/>Zectrix Note 4"] -->|"HTTPS POST /api/sync (done/enabled flags)"| S["inkpaper-server<br/>Rust + axum + SQLite"]
+    D["inkwash-firmware<br/>Zectrix Note 4"] -->|"HTTPS POST /api/sync (done/enabled flags)"| S["inkwash-server<br/>Rust + axum + SQLite"]
     S -->|"JSON alarms + todos"| D
-    T["inkpaper-desktop<br/>Tauri 2 + Vue 3"] -->|"USB serial / BLE (set_wifi, set_server, sync_now)"| D
+    T["inkwash-desktop<br/>Tauri 2 + Vue 3"] -->|"USB serial / BLE (set_wifi, set_server, sync_now)"| D
     T -->|"HTTPS admin API (ADMIN_TOKEN)"| S
 ```
 
-- **this repo (`inkpaper-firmware`)** — the Note 4 firmware (Rust, esp-idf).
-- [**inkpaper-server**](https://github.com/counhopig/inkpaper-server) —
+- **this repo (`inkwash-firmware`)** — the Note 4 firmware (Rust, esp-idf).
+- [**inkwash-server**](https://github.com/counhopig/inkwash-server) —
   personal-scale cloud backend: per-device tokens, ETag/304 caching,
   embedded admin console.
-- [**inkpaper-desktop**](https://github.com/counhopig/inkpaper-desktop) —
+- [**inkwash-desktop**](https://github.com/counhopig/inkwash-desktop) —
   PC tool to register devices, author alarms/todos, and configure the
   device over USB/BLE.
 
@@ -75,7 +75,7 @@ espflash flash --port /dev/tty.usbmodem1101 \
   --chip esp32s3 --flash-size 16mb \
   --flash-mode dio --flash-freq 80mhz \
   --partition-table partitions.csv \
-  --non-interactive target/xtensa-esp32s3-espidf/release/inkpaper-note4
+  --non-interactive target/xtensa-esp32s3-espidf/release/inkwash-note4
 ```
 
 > **Red lines** (flashing the wrong thing = brick): DIO flash mode only
@@ -115,7 +115,7 @@ espflash flash --port /dev/tty.usbmodem1101 \
 ## Repository layout
 
 ```text
-inkpaper-firmware/
+inkwash-firmware/
 ├── docs/                  # dev guide, hardware spec, protocol contracts
 ├── rust-firmware/         # the crate: 20+ modules, ~4.5k LOC + EPD FFI
 ├── scripts/               # build / flash / wifi-provision helpers

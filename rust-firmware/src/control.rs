@@ -3,8 +3,8 @@
 //! **Wire format:** Commands and replies are framed by the transport layer
 //! (e.g., `usb_console.rs`) with a sentinel prefix to distinguish them from
 //! ordinary log output:
-//! - Command frame: `>>IP {json}\n` (one JSON object per line)
-//! - Reply frame: `<<IP {json}\n` (one JSON object per line)
+//! - Command frame: `>>IW {json}\n` (one JSON object per line)
+//! - Reply frame: `<<IW {json}\n` (one JSON object per line)
 //!
 //! See `docs/control-protocol.md` for the complete specification.
 

@@ -38,7 +38,7 @@ pub fn render(
     // desktop tool's mark), then the wordmark.
     canvas.stroke_rect(16, 9, 14, 14, 2);
     canvas.fill_rect(21, 14, 4, 4, true);
-    canvas.draw_text_prop(38, 8, 1, "INKPAPER");
+    canvas.draw_text_prop(38, 8, 1, "INKWASH");
 
     // Status cluster is right-aligned like every other header, built from
     // icon glyphs (right to left: battery, wifi, inbox-badge). Wi-Fi's icon

@@ -1,9 +1,18 @@
 # Changelog
 
-All notable changes to **inkpaper-firmware** are documented in this file.
+All notable changes to **inkwash-firmware** are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.4.0] - 2026-08-21
+
+### Changed
+- **Rebranded to Inkwash** - display wordmark, USB/BLE protocol framing
+  (`>>IP ` / `<<IP ` -> `>>IW ` / `<<IW `), the urgent-poll header
+  (`x-inkpaper-poll` -> `x-inkwash-poll`), crate/binary name
+  (`inkwash-note4`), and NVS namespaces (device data resets on first
+  boot - re-provision Wi-Fi/server via the desktop tool).
 
 ## [0.3.0] - 2026-08-21
 
@@ -14,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   insistent two-tone siren for high-priority alert messages.
 - **Lightweight urgent poll** — replaces the long-poll: every 30 s (on
   the wall-clock :00/:30 boundaries) the device asks the server with
-  `X-Inkpaper-Poll: 1` and gets an instant `{"urgent": bool}` answer; a
+  `X-Inkwash-Poll: 1` and gets an instant `{"urgent": bool}` answer; a
   full sync follows only when a high-priority message is pending.
 - **Full GB2312 CJK fonts** — 16×16 and 12×12 bitmap fonts (Noto Sans
   SC, 7445 characters, SIL OFL 1.1) embedded and rendered mixed with the

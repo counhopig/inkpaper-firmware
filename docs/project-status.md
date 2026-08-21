@@ -1,6 +1,6 @@
-# Inkpaper Project Status
+# Inkwash Project Status
 
-Cross-repo snapshot of where things stand across the Inkpaper system, as of
+Cross-repo snapshot of where things stand across the Inkwash system, as of
 2026-08-21 (v0.3.0). Update this when the shape of any repo changes
 significantly - it's meant to answer "what's built, what's tested, what's
 left" without having to reconstruct it from commit history.
@@ -10,13 +10,13 @@ left" without having to reconstruct it from commit history.
 Four repos, one device, all public on GitHub under `counhopig`:
 
 ```
-inkpaper-desktop (PC tool)          inkpaper-server (backend)
+inkwash-desktop (PC tool)          inkwash-server (backend)
        |  USB serial / BLE                |  HTTPS POST (device pushes
        |  (config only:                   |  locally-changed flags,
        |   wifi creds, server url+token,  |  server merges + returns the
        |   timezone)                      |  authoritative lists)
        v                                  v
-              inkpaper (firmware)    <-    inkpaper-mcp (MCP server)
+              inkwash (firmware)    <-    inkwash-mcp (MCP server)
               Zectrix Note 4              (any agent can push webhook
                                           notifications to the device)
 ```
@@ -28,9 +28,9 @@ ring with zero network connectivity**. Since v0.3.0 sync is **two-way**: the
 device uploads only flags it changed locally (dirty-set tracking), so edits
 made in the server/desktop UIs survive the next sync.
 
-## `inkpaper` (firmware)
+## `inkwash` (firmware)
 
-Repo: `counhopig/inkpaper-firmware`. Rust (esp-idf), 400×300 SSD2683 EPD.
+Repo: `counhopig/inkwash-firmware`. Rust (esp-idf), 400×300 SSD2683 EPD.
 
 Implemented and verified on real hardware:
 
@@ -40,7 +40,7 @@ Implemented and verified on real hardware:
 - **Offline-capable alarm**: PCF8563 hardware alarm + deep-sleep wake +
   ES8311 tone - rings without Wi-Fi.
 - **Cron-aligned sync**: urgent polls at each :00/:30 wall-clock boundary
-  (lightweight `X-Inkpaper-Poll`), full syncs at every `interval` boundary,
+  (lightweight `X-Inkwash-Poll`), full syncs at every `interval` boundary,
   once-per-day NTP resync of the PCF8563 (verified: RTC drift corrected).
 - **Full GB2312 CJK fonts** (16×16 + 12×12, Noto Sans SC, 7445 chars) with
   width-aware truncation everywhere; mixed ASCII+CJK rendering verified on
@@ -64,16 +64,16 @@ crash (fixed by removing the redundant `esp_wifi_scan_start()`); the Wi-Fi
 singleton constraints (`never esp_wifi_stop()`/`esp_restart()`) and the
 deep-sleep restart path are documented in `rust-firmware/src/wifi.rs`.
 
-## `inkpaper-server` (backend)
+## `inkwash-server` (backend)
 
-Repo: `counhopig/inkpaper-server`. Rust + axum + sqlx (`Any` driver: SQLite
+Repo: `counhopig/inkwash-server`. Rust + axum + sqlx (`Any` driver: SQLite
 or PostgreSQL), embedded Vue 3 admin console.
 
 - Admin API (single `ADMIN_TOKEN` + console accounts with Argon2id
   passwords, per-account device ownership).
 - Device-facing `POST /api/sync`: merges locally-changed flags, ETag/304
   caching, `inbox_read_acked` echo, `inbox_truncated` flag, and the
-  lightweight `X-Inkpaper-Poll` urgent check.
+  lightweight `X-Inkwash-Poll` urgent check.
 - **Webhook channels**: per-device channels with one-time delivery tokens,
   `POST /api/channels/:id/messages` with idempotency keys, size limits and
   `priority: high` urgent flagging. Inbox admin endpoints.
@@ -83,9 +83,9 @@ Verified via curl-driven API passes and end-to-end against the physical
 device. Deployment is LAN-only HTTP (a LAN Linux host); public HTTPS with a
 real certificate chain remains untested.
 
-## `inkpaper-desktop` (PC tool)
+## `inkwash-desktop` (PC tool)
 
-Repo: `counhopig/inkpaper-desktop`. Tauri 2 + Vue 3 + TypeScript + Pinia.
+Repo: `counhopig/inkwash-desktop`. Tauri 2 + Vue 3 + TypeScript + Pinia.
 
 - Overview / Device (USB+BLE config push, sync trigger, status) / Content
   (device registration, alarm/todo authoring, **channels & inbox
@@ -97,9 +97,9 @@ build; the Tauri/Vue rewrite was exercised with the real device for USB
 status/sync during v0.2.0/v0.3.0 development. Windows/Linux bundles and
 platform permission behavior remain untested (macOS only).
 
-## `inkpaper-mcp` (MCP server)
+## `inkwash-mcp` (MCP server)
 
-Repo: `counhopig/inkpaper-mcp`. Node/TypeScript (Bun), stdio MCP server
+Repo: `counhopig/inkwash-mcp`. Node/TypeScript (Bun), stdio MCP server
 exposing a single `notify` tool that posts to a channel webhook.
 
 - `priority: high` → device shows the URGENT full-screen reminder + siren
@@ -107,8 +107,8 @@ exposing a single `notify` tool that posts to a channel webhook.
 - Generic across agents: opencode (global plugin with lifecycle hooks),
   Claude Code (hooks in `~/.claude/settings.json`), Codex (`notify` +
   `hooks.json`), or any MCP client / plain HTTP.
-- Config via env vars only (`INKPAPER_SERVER_URL`, `INKPAPER_CHANNEL_ID`,
-  `INKPAPER_WEBHOOK_TOKEN`) - no secrets in the repo.
+- Config via env vars only (`INKWASH_SERVER_URL`, `INKWASH_CHANNEL_ID`,
+  `INKWASH_WEBHOOK_TOKEN`) - no secrets in the repo.
 
 ## Known issues / open items
 

@@ -13,7 +13,7 @@ use anyhow::{anyhow, Result};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use serde::{Deserialize, Serialize};
 
-const NAMESPACE: &str = "inkpaper_inbox";
+const NAMESPACE: &str = "inkwash_inbox";
 const KEY_ITEMS: &str = "items";
 const KEY_PENDING: &str = "pending";
 const BLOB_BUF_LEN: usize = 4096;

@@ -176,7 +176,7 @@ From a plain shell, run in the repository root:
 ./scripts/build-rust.sh --release
 ```
 
-The script sources the ESP-IDF environment and then runs `cargo build --release` in `rust-firmware`. The artifact is at `rust-firmware/target/xtensa-esp32s3-espidf/release/inkpaper-note4` (Linux has no Windows path length limit, so a fixed output directory is no longer needed).
+The script sources the ESP-IDF environment and then runs `cargo build --release` in `rust-firmware`. The artifact is at `rust-firmware/target/xtensa-esp32s3-espidf/release/inkwash-note4` (Linux has no Windows path length limit, so a fixed output directory is no longer needed).
 
 After modifying the extra component configuration in `Cargo.toml`, if the new FFI module does not appear, clean `esp-idf-sys` and rebuild:
 
@@ -199,7 +199,7 @@ espflash flash \
   --flash-mode dio \
   --flash-freq 80mhz \
   --partition-table rust-firmware/partitions.csv \
-  rust-firmware/target/xtensa-esp32s3-espidf/release/inkpaper-note4
+  rust-firmware/target/xtensa-esp32s3-espidf/release/inkwash-note4
 
 espflash monitor --port /dev/ttyACM0
 ```
@@ -250,7 +250,7 @@ An e-paper display retains its last image after power-off; this is normal. Seein
 
 ### Storage and Power State
 
-- `storage.rs` wraps the default NVS partition (a `nvs` 24 KiB partition is declared in `partitions.csv`) under the `inkpaper` namespace. `PersistedCounters` (historically evolved from button-counter persistence; the name stuck) now stores six keys: `wifi_ssid` / `wifi_pass` / `server_url` / `auth_token` / `sync_etag` / `timezone_min`; `open()` calls `EspDefaultNvsPartition::take()` to initialize the NVS flash automatically. The `AlarmStore`/`TodoStore` in `alarms.rs`/`todos.rs` each hold additional namespaces of the same NVS partition and store whole JSON blobs rather than per-field keys.
+- `storage.rs` wraps the default NVS partition (a `nvs` 24 KiB partition is declared in `partitions.csv`) under the `inkwash` namespace. `PersistedCounters` (historically evolved from button-counter persistence; the name stuck) now stores six keys: `wifi_ssid` / `wifi_pass` / `server_url` / `auth_token` / `sync_etag` / `timezone_min`; `open()` calls `EspDefaultNvsPartition::take()` to initialize the NVS flash automatically. The `AlarmStore`/`TodoStore` in `alarms.rs`/`todos.rs` each hold additional namespaces of the same NVS partition and store whole JSON blobs rather than per-field keys.
 - `board.rs::battery_millivolts()` uses the ESP-IDF 5.x ADC oneshot API: `AdcDriver::new(peripherals.adc1)` holds the ADC unit persistently; each voltage read takes `GPIO4` (ADC1 CH3 on the ESP32-S3) via `Peripherals::steal()` and temporarily constructs `AdcChannelDriver::new(&self.adc, gpio4, &BATTERY_ADC_CHANNEL_CONFIG)`. Because every field of `Note4Board` is `'static`, putting the channel directly into the board would trigger a borrow conflict, so the strategy is to "rebuild the channel on each read"; the return value is ESP-IDF mV × 2 (onboard 1:2 divider) and is clamped to `u16::MAX`. `BATTERY_ADC_CHANNEL_CONFIG` enables `Calibration::Curve` (eFuse three-point fitting, matching the official demo's `adc_cali_curve_fitting`) and averages `BATTERY_ADC_SAMPLES = 10` readings to suppress jitter.
 - The `main.rs` main loop calls `report_power_state()` every `STATUS_REPORT_INTERVAL_POLLS` (50 polls ≈ 1 s), printing `Power state: power_present=… charging=… full=… vbat_mV=… (..%)`; it re-reads the PCF8563 every `CLOCK_POLL_INTERVAL_POLLS` (60 polls ≈ 1.2 s) and marks `CLOCK_RECT` as dirty to trigger a partial refresh only when the second/minute/hour change, avoiding a redraw on every poll.
 - Charging state is determined by the `ChargeStatus` state machine in `board.rs` (ported from the official demo's `charge_status.cc`, a simplified debounced version); each tick ≈ 1 s, and stabilization requires 2 consecutive ticks: `power_present` (any status line active), `charging` (`CHRG_L = GPIO2` low and not full), `full` (`STDBY_H = GPIO1` high). `report_power_state` calls `charging_state()` to advance the state machine; the rendering path only reads `charge_snapshot()` so different call frequencies do not break debouncing. Confirmed on real hardware: when fully charged and plugged in, the state is `power_present=true charging=false full=true` (the charging IC has stopped charging; `charging=false` is the real state, not a bug).
@@ -328,7 +328,7 @@ Remaining:
 1. File system, content caching strategy.
 2. OTA, rollback.
 3. Real-device verification: the full alarm ringing → dismiss flow, BLE pairing end-to-end (especially since it must be redone
-   after switching to the Tauri/Vue version of `inkpaper-desktop` — the old verification was done under an earlier Desktop
+   after switching to the Tauri/Vue version of `inkwash-desktop` — the old verification was done under an earlier Desktop
    implementation), and the actual Wi-Fi reconnect-without-restart experience.
    See the "Not Yet Done / Not Yet Verified" section of the root README and `docs/project-status.md` for details.
 
