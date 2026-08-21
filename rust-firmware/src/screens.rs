@@ -9,7 +9,6 @@ use crate::ctx::DeviceContext;
 use crate::display::Rect;
 use crate::inbox::{InboxItem, InboxStore};
 use crate::rtc::{is_leap, DateTime};
-use crate::storage::PersistedCounters;
 use crate::sync;
 use crate::todos::{Importance, TodoStore};
 use crate::ui::{
@@ -69,7 +68,8 @@ pub fn open_menu(
     ];
     loop {
         let want_nav = match pick_from_list(
-            ctx.board,
+            ctx,
+            now,
             "SETTINGS",
             &items,
             "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
@@ -79,7 +79,7 @@ pub fn open_menu(
                 sync_now_screen(ctx, now);
                 false
             }
-            PickResult::Selected(1) => sync_interval_screen(ctx.board, ctx.counters),
+            PickResult::Selected(1) => sync_interval_screen(ctx, now),
             PickResult::Selected(2) => {
                 ble_pairing_screen(ctx, now, ble_control);
                 false
@@ -117,7 +117,7 @@ pub fn open_menu(
 /// minutes while idle on Home (see `main.rs`'s `maybe_auto_sync`). Returns
 /// `true` when the user long-pressed UP/DOWN, so the caller can open the
 /// navigation drawer (this screen lacks the full context to do so itself).
-fn sync_interval_screen(board: &mut Note4Board, counters: &PersistedCounters) -> bool {
+fn sync_interval_screen(ctx: &mut DeviceContext, now: Option<&DateTime>) -> bool {
     const OPTIONS: [(&str, u16); 5] = [
         ("1 MIN", 1),
         ("5 MIN", 5),
@@ -127,7 +127,8 @@ fn sync_interval_screen(board: &mut Note4Board, counters: &PersistedCounters) ->
     ];
     let items: Vec<String> = OPTIONS.iter().map(|(label, _)| label.to_string()).collect();
     let outcome = pick_from_list(
-        board,
+        ctx,
+        now,
         "SYNC INTERVAL",
         &items,
         "UP/DOWN MOVE   ENTER OK   HOLD ENTER BACK",
@@ -139,11 +140,11 @@ fn sync_interval_screen(board: &mut Note4Board, counters: &PersistedCounters) ->
         return matches!(outcome, PickResult::OpenNav);
     };
     let (_, minutes) = OPTIONS[index];
-    match counters.set_sync_interval_minutes(minutes) {
+    match ctx.counters.set_sync_interval_minutes(minutes) {
         Ok(()) => {
             log::info!("Sync interval set to {minutes} min");
             show_message(
-                board,
+                ctx.board,
                 "SYNC INTERVAL",
                 &[&format!("{minutes} MIN")],
                 std::time::Duration::from_secs(1),
@@ -238,7 +239,11 @@ fn draw_navigation_bar(canvas: &mut Canvas, selected: usize) {
 /// full-screen list, the bar is drawn over the live page (see
 /// `draw_navigation_bar`) so you keep your place on screen while browsing
 /// destinations. Returns the chosen index, or `None` on hold-to-cancel.
-fn pick_navigation(board: &mut Note4Board, current: Page) -> Option<usize> {
+fn pick_navigation(
+    ctx: &mut DeviceContext,
+    now: Option<&DateTime>,
+    current: Page,
+) -> Option<usize> {
     let current_index = match current {
         Page::Home => 0,
         Page::Calendar => 1,
@@ -249,13 +254,14 @@ fn pick_navigation(board: &mut Note4Board, current: Page) -> Option<usize> {
     let mut selected = current_index;
     let mut needs_redraw = true;
     loop {
+        let _ = ctx.poll_usb_control(now);
         if needs_redraw {
-            let canvas = board.display.canvas_mut();
+            let canvas = ctx.board.display.canvas_mut();
             draw_navigation_bar(canvas, selected);
-            board.display.refresh_partial_best_effort(NAV_BAR_RECT);
+            ctx.board.display.refresh_partial_best_effort(NAV_BAR_RECT);
             needs_redraw = false;
         }
-        match poll_nav(board) {
+        match poll_nav(ctx.board) {
             Nav::Up => {
                 selected = if selected == 0 {
                     NAV_DESTINATIONS.len() - 1
@@ -292,7 +298,7 @@ pub fn open_navigation(
     ble_control: &mut Option<crate::ble_control::BleControl>,
 ) {
     loop {
-        let Some(selected) = pick_navigation(ctx.board, Page::Home) else {
+        let Some(selected) = pick_navigation(ctx, now, Page::Home) else {
             return;
         };
         match selected {
@@ -333,16 +339,11 @@ fn browse_page(
     let mut needs_redraw = true;
     let mut first_draw = true;
     loop {
-        if let Some(cmd) = ctx.usb_console.poll_command() {
-            let needs_redraw_after = !matches!(cmd, crate::control::Command::GetStatus);
-            let reply = crate::control::dispatch(ctx, cmd, live_now.as_ref());
-            crate::usb_console::write_reply(&reply);
-            if needs_redraw_after && matches!(reply, crate::control::Reply::Ok) {
-                if let Ok(fresh) = ctx.board.rtc.read_time() {
-                    live_now = Some(fresh);
-                }
-                needs_redraw = true;
+        if ctx.poll_usb_control(live_now.as_ref()) {
+            if let Ok(fresh) = ctx.board.rtc.read_time() {
+                live_now = Some(fresh);
             }
+            needs_redraw = true;
         }
         if needs_redraw {
             match page {
@@ -439,7 +440,7 @@ fn browse_page(
 
         match poll_nav(ctx.board) {
             Nav::PageUp | Nav::PageDown => {
-                match pick_navigation(ctx.board, page) {
+                match pick_navigation(ctx, live_now.as_ref(), page) {
                     Some(0) => return,
                     Some(1) => page = Page::Calendar,
                     Some(2) => page = Page::Inbox,
@@ -515,14 +516,9 @@ fn browse_page(
             Nav::Enter => {
                 match page {
                     Page::Home => {}
-                    Page::Alarms => activate_alarm_row(
-                        ctx.board,
-                        ctx.alarm_store,
-                        live_now.as_ref(),
-                        alarm_selected,
-                    ),
+                    Page::Alarms => activate_alarm_row(ctx, live_now.as_ref(), alarm_selected),
                     Page::Todos => activate_todo_row(ctx.todo_store, todo_selected),
-                    Page::Inbox => open_inbox_item(ctx.board, ctx.inbox_store, inbox_selected),
+                    Page::Inbox => open_inbox_item(ctx, live_now.as_ref(), inbox_selected),
                     Page::Calendar => {
                         if let Some(dt) = live_now.as_ref() {
                             week_view(
@@ -958,16 +954,11 @@ fn render_alarm_page(board: &mut Note4Board, store: &AlarmStore, selected: usize
     footer(canvas, "UP/DOWN MOVE   ENTER OK   HOLD UP/DOWN PAGE");
 }
 
-fn activate_alarm_row(
-    board: &mut Note4Board,
-    store: &AlarmStore,
-    now: Option<&DateTime>,
-    selected: usize,
-) {
-    let mut list = store.load().unwrap_or_default();
+fn activate_alarm_row(ctx: &mut DeviceContext, now: Option<&DateTime>, selected: usize) {
+    let mut list = ctx.alarm_store.load().unwrap_or_default();
     let mut toggled_id = None;
     if selected >= list.len() {
-        if let Some(alarm) = add_alarm_screen(board, &list) {
+        if let Some(alarm) = add_alarm_screen(ctx, now, &list) {
             list.push(alarm);
         } else {
             return;
@@ -976,17 +967,17 @@ fn activate_alarm_row(
         list[selected].enabled = !list[selected].enabled;
         toggled_id = Some(list[selected].id);
     }
-    if let Err(err) = store.save(&list) {
+    if let Err(err) = ctx.alarm_store.save(&list) {
         log::warn!("Failed to save alarms: {err}");
         return;
     }
     if let Some(id) = toggled_id {
-        if let Err(err) = store.mark_dirty(id) {
+        if let Err(err) = ctx.alarm_store.mark_dirty(id) {
             log::warn!("Alarm saved but failed to mark it dirty: {err}");
         }
     }
     if let Some(dt) = now {
-        if let Err(err) = alarms::program_hardware_alarm(&mut board.rtc, &list, dt) {
+        if let Err(err) = alarms::program_hardware_alarm(&mut ctx.board.rtc, &list, dt) {
             log::warn!("Failed to reprogram hardware alarm: {err}");
         }
     }
@@ -1108,16 +1099,16 @@ fn render_inbox_page(board: &mut Note4Board, store: &InboxStore, selected: usize
 }
 
 /// Opens an inbox item's detail (title + body) and marks it read locally.
-fn open_inbox_item(board: &mut Note4Board, store: &InboxStore, selected: usize) {
-    let list = store.load().unwrap_or_default();
-    let Some(item) = list.get(selected) else {
+fn open_inbox_item(ctx: &mut DeviceContext, now: Option<&DateTime>, selected: usize) {
+    let list = ctx.inbox_store.load().unwrap_or_default();
+    let Some(item) = list.get(selected).cloned() else {
         return;
     };
-    if let Err(err) = store.mark_read(item.id) {
+    if let Err(err) = ctx.inbox_store.mark_read(item.id) {
         log::warn!("Failed to mark inbox item read: {err}");
     }
 
-    let canvas = board.display.canvas_mut();
+    let canvas = ctx.board.display.canvas_mut();
     canvas.clear();
     header(canvas, "INBOX");
     // Title: scale 2 when it fits, otherwise wrap to up to two scale-1
@@ -1152,9 +1143,12 @@ fn open_inbox_item(board: &mut Note4Board, store: &InboxStore, selected: usize) 
         y += 18;
     }
     footer(canvas, "ENTER / HOLD ENTER CLOSE");
-    board.display.refresh_full_best_effort();
+    ctx.board.display.refresh_full_best_effort();
     loop {
-        match poll_nav(board) {
+        if ctx.poll_usb_control(now) {
+            return;
+        }
+        match poll_nav(ctx.board) {
             Nav::None => {}
             _ => return,
         }
@@ -1165,9 +1159,13 @@ fn open_inbox_item(board: &mut Note4Board, store: &InboxStore, selected: usize) 
 /// Two-stage hour/minute stepper for a new daily alarm - editing repeat
 /// mode or a specific one-shot date is left to the PC tool/server sync
 /// path, not this on-device screen.
-fn add_alarm_screen(board: &mut Note4Board, existing: &[StoredAlarm]) -> Option<StoredAlarm> {
-    let hour = pick_number(board, "NEW ALARM - HOUR", 0, 23)?;
-    let minute = pick_number(board, "NEW ALARM - MINUTE", 0, 59)?;
+fn add_alarm_screen(
+    ctx: &mut DeviceContext,
+    now: Option<&DateTime>,
+    existing: &[StoredAlarm],
+) -> Option<StoredAlarm> {
+    let hour = pick_number(ctx, now, "NEW ALARM - HOUR", 0, 23)?;
+    let minute = pick_number(ctx, now, "NEW ALARM - MINUTE", 0, 59)?;
     Some(StoredAlarm {
         id: alarms::next_id(existing),
         hour,
@@ -1272,6 +1270,7 @@ fn ble_pairing_screen(
             // tears BLE down.
             let started_at = std::time::Instant::now();
             loop {
+                let _ = ctx.poll_usb_control(now);
                 if let Some(cmd) = ble_control.as_ref().and_then(|ble| ble.poll_command()) {
                     let reply = crate::control::dispatch(ctx, cmd, now);
                     if let Some(ble) = ble_control.as_ref() {

@@ -9,7 +9,9 @@ use std::time::Duration;
 use crate::board::Note4Board;
 use crate::button::{ButtonEvent, POLL_INTERVAL_MS};
 use crate::canvas::Canvas;
+use crate::ctx::DeviceContext;
 use crate::display::Rect;
+use crate::rtc::DateTime;
 use crate::watchdog;
 
 /// Outcome of one blocking poll wait: which control fired, if any.
@@ -146,7 +148,8 @@ pub enum PickResult {
 /// on first draw (e.g. the day a week view was opened for, or the current
 /// page in the GO TO drawer) - callers that don't care pass 0.
 pub fn pick_from_list(
-    board: &mut Note4Board,
+    ctx: &mut DeviceContext,
+    now: Option<&DateTime>,
     title: &str,
     items: &[String],
     hint: &str,
@@ -159,15 +162,16 @@ pub fn pick_from_list(
     let mut needs_redraw = true;
     let mut first_draw = true;
     loop {
+        let _ = ctx.poll_usb_control(now);
         if needs_redraw {
-            let canvas = board.display.canvas_mut();
+            let canvas = ctx.board.display.canvas_mut();
             draw_rows(canvas, title, items, selected);
             footer(canvas, hint);
             if first_draw {
-                board.display.refresh_full_best_effort();
+                ctx.board.display.refresh_full_best_effort();
                 first_draw = false;
             } else {
-                board.display.refresh_partial_best_effort(Rect {
+                ctx.board.display.refresh_partial_best_effort(Rect {
                     x: 8,
                     y: 34,
                     width: 384,
@@ -176,7 +180,7 @@ pub fn pick_from_list(
             }
             needs_redraw = false;
         }
-        match poll_nav(board) {
+        match poll_nav(ctx.board) {
             Nav::Up => {
                 selected = if selected == 0 {
                     items.len() - 1
@@ -200,13 +204,20 @@ pub fn pick_from_list(
 
 /// Blocking UP/DOWN-cycles-a-number, ENTER-confirms stepper, wrapping in
 /// `[min, max]`. `None` on hold-to-cancel.
-pub fn pick_number(board: &mut Note4Board, title: &str, min: u8, max: u8) -> Option<u8> {
+pub fn pick_number(
+    ctx: &mut DeviceContext,
+    now: Option<&DateTime>,
+    title: &str,
+    min: u8,
+    max: u8,
+) -> Option<u8> {
     let mut value = min;
     let mut needs_redraw = true;
     let mut first_draw = true;
     loop {
+        let _ = ctx.poll_usb_control(now);
         if needs_redraw {
-            let canvas = board.display.canvas_mut();
+            let canvas = ctx.board.display.canvas_mut();
             canvas.clear();
             header(canvas, title);
             let label = format!("{value:02}");
@@ -240,10 +251,10 @@ pub fn pick_number(board: &mut Note4Board, title: &str, min: u8, max: u8) -> Opt
             canvas.draw_text_prop(value_x, value_y, 5, &label);
             footer(canvas, "UP/DOWN CHANGE   ENTER OK   HOLD ENTER BACK");
             if first_draw {
-                board.display.refresh_full_best_effort();
+                ctx.board.display.refresh_full_best_effort();
                 first_draw = false;
             } else {
-                board.display.refresh_partial_best_effort(Rect {
+                ctx.board.display.refresh_partial_best_effort(Rect {
                     x: 96,
                     y: 78,
                     width: 208,
@@ -252,7 +263,7 @@ pub fn pick_number(board: &mut Note4Board, title: &str, min: u8, max: u8) -> Opt
             }
             needs_redraw = false;
         }
-        match poll_nav(board) {
+        match poll_nav(ctx.board) {
             Nav::Up => {
                 value = if value == max { min } else { value + 1 };
                 needs_redraw = true;

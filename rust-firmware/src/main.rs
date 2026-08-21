@@ -379,13 +379,8 @@ fn main() -> Result<()> {
         }
 
         // Poll USB console for incoming commands, dispatch them, and send replies.
-        if let Some(cmd) = ctx.usb_console.poll_command() {
-            let needs_full_redraw = !matches!(cmd, control::Command::GetStatus);
-            let reply = control::dispatch(&mut ctx, cmd, clock.as_ref());
-            if needs_full_redraw && matches!(reply, control::Reply::Ok) {
-                dirty.push(FULL_SCREEN_RECT);
-            }
-            usb_console::write_reply(&reply);
+        if ctx.poll_usb_control(clock.as_ref()) {
+            dirty.push(FULL_SCREEN_RECT);
         }
 
         // Poll BLE for incoming commands (if BLE is active), dispatch them, and send replies.

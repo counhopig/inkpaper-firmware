@@ -258,10 +258,10 @@ notifications are already message-delimited at the link layer).
 
 ### Limitations (same as USB)
 
-- Commands are dispatched from Home, content-page browsing, and the BLE
-  pairing screen. Short modal pickers still own the main task while active;
-  clients should retry after returning to a content page if one of those
-  transient screens delays a reply.
+- Commands are dispatched from Home, content-page browsing, navigation and
+  settings pickers, numeric alarm entry, inbox detail, and the BLE pairing
+  screen. Deliberately time-critical alarm/reminder screens may defer control
+  traffic until the user dismisses them.
 
 ---
 
@@ -300,9 +300,8 @@ command execution, so a hung sync will eventually reboot the device.
   `get_status`, `clear_alarms`, and `set_timezone`.
 - No rate limiting or command queueing; commands are dispatched as they arrive.
 - `UsbConsole` has no dedicated reader task. Home and the long-lived content
-  pages poll it non-blockingly, while short modal pickers can still delay a
-  command until they return. Input lines are capped at 512 bytes so a broken
-  client cannot grow the firmware heap without bound.
+  pages and interactive pickers poll it non-blockingly. Input lines are capped
+  at 512 bytes so a broken client cannot grow the firmware heap without bound.
 - **Opening the serial port can itself trigger a spurious ENTER press.**
   This board's USB-Serial-JTAG auto-reset circuitry (the same one `espflash`
   uses to enter the bootloader) wires the DTR/RTS control lines to GPIO0 -
