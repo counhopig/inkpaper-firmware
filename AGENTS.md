@@ -74,9 +74,9 @@ espflash monitor --port /dev/tty.usbmodem1101     # serial logs (the only "testi
 ```
 
 ## RELEASES
-Firmware releases are built **locally** — a full ESP-IDF toolchain is impractical on CI — and published with `scripts/release.sh <tag>` (e.g. `./scripts/release.sh v0.2.0`). It builds the release ELF, tags (only if the tag doesn't already exist), pushes the tag to `origin` + `github`, then creates a **published** (non-draft) GitHub Release on `counhopig/inkpaper-firmware` via `gh`.
+Firmware releases are built **locally** — a full ESP-IDF toolchain is impractical on CI — and published with `scripts/release.sh <tag>` (e.g. `./scripts/release.sh v0.3.0`). It builds the release ELF, tags (only if the tag doesn't already exist), pushes the tag to `origin` + `github`, then creates a **published** (non-draft) GitHub Release on `counhopig/inkpaper-firmware` via `gh`.
 
-- **Critical:** `release.sh` builds the **local working tree** but tags whatever commit is checked out, and it **reuses an existing tag** without moving it. So before releasing, make sure `git status` is clean and the intended commit is checked out — otherwise the binary and the tag can disagree (e.g. re-running `release.sh v0.1.0` after moving that tag attaches the new build to the old tag's commit). To re-release a version that already has a tag, delete the old tag + release first:
+- **Critical:** `release.sh` builds the **local working tree** but tags whatever commit is checked out, and it **reuses an existing tag** without moving it. So before releasing, make sure `git status` is clean and the intended commit is checked out — otherwise the binary and the tag can disagree (e.g. re-running `release.sh v0.3.0` after moving that tag attaches the new build to the old tag's commit). To re-release a version that already has a tag, delete the old tag + release first:
   ```bash
   gh release delete v0.1.0 --repo counhopig/inkpaper-firmware --yes
   git push origin  :refs/tags/v0.1.0
@@ -85,7 +85,7 @@ Firmware releases are built **locally** — a full ESP-IDF toolchain is impracti
   git push origin v0.1.0 && git push github v0.1.0
   ./scripts/release.sh v0.1.0
   ```
-- Release check: `gh release view v0.1.0 --repo counhopig/inkpaper-firmware --json isDraft,assets` (expect `isDraft: false` and the `inkpaper-note4` firmware asset).
+- Release check: `gh release view v0.3.0 --repo counhopig/inkpaper-firmware --json isDraft,assets` (expect `isDraft: false` and the `inkpaper-note4` firmware asset).
 
 ## NOTES
 - `rust-firmware/.cargo/config.toml` contains machine-specific paths (`IDF_PATH=~/esp/esp-idf`, `LIBCLANG_PATH` pointing at this machine's espup esp-clang) — must be edited manually when switching machines or toolchain versions.

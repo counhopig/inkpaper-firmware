@@ -5,7 +5,60 @@ All notable changes to **inkpaper-firmware** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-08-21
+
+### Added
+- **Device inbox** — notifications pushed from external sources via the
+  server's webhook channels: browse / open / mark-read, an unread badge
+  on the home screen, and full-screen **URGENT** reminders with an
+  insistent two-tone siren for high-priority alert messages.
+- **Lightweight urgent poll** — replaces the long-poll: every 30 s (on
+  the wall-clock :00/:30 boundaries) the device asks the server with
+  `X-Inkpaper-Poll: 1` and gets an instant `{"urgent": bool}` answer; a
+  full sync follows only when a high-priority message is pending.
+- **Full GB2312 CJK fonts** — 16×16 and 12×12 bitmap fonts (Noto Sans
+  SC, 7445 characters, SIL OFL 1.1) embedded and rendered mixed with the
+  ASCII fonts in every screen; regenerable via
+  `tools/generate_cjk_font.py`. List rows, titles and reminders truncate
+  by measured width, and word-wrap respects UTF-8 char boundaries.
+- **Two-way sync** — the device uploads only *locally changed* flags
+  (persisted dirty-set, cleared after a successful round-trip), so edits
+  made on the Server/Desktop side survive the next sync instead of being
+  clobbered by the device's stale copy.
+- **Cron-aligned automatic sync** — urgent polls fire at each :00/:30
+  wall-clock boundary and full syncs at every `interval` boundary (top
+  of the hour for 1 h, :05 marks for 5 min, ...), driven by the RTC
+  instead of a boot-relative timer; a never-synced device syncs on its
+  first boundary.
+- **Daily NTP RTC alignment** — the PCF8563 is resynced over NTP once a
+  day inside the sync connection window, so the cron boundaries never
+  drift off the real wall clock.
+- **DeviceContext refactor** — board / stores / wifi / counters bundled
+  into one context threaded through screens, control and main instead of
+  eight-argument parameter bundles.
+- **NVS-safe inbox storage** — bodies are truncated to 300 chars and the
+  oldest items dropped by a byte budget, so a large Chinese backlog can
+  no longer fail the whole sync with `items blob too large`.
+
+### Changed
+- Full-screen URGENT / TODOS DUE / ALARM screens now share the standard
+  page header (brand + title + rule); the number-picker value is
+  vertically centered; the inbox detail page fits long titles by scaling
+  down or wrapping.
+- `docs/sync-api.md` documents the lightweight poll and the dirty-set
+  upload semantics.
+
+### Fixed
+- Inbox detail body text overflowed the right edge (wrapped with the
+  5×7 metrics but drawn with the 8×16 font).
+- Long rows and titles with CJK text overflowed (char-count truncation
+  replaced with measured-width truncation).
+- Word-wrap panicked on multi-byte characters (byte-splitting now steps
+  back to char boundaries).
+- The URGENT siren could not be dismissed with ENTER (the debouncer was
+  never fed inside the ring loop).
+- Stale reminder pixels remained on Home after dismissing a full-screen
+  alert (no forced redraw).
 
 ## [0.2.0] - 2026-08-20
 

@@ -90,9 +90,18 @@ espflash flash --port /dev/tty.usbmodem1101 \
   works with no network and no server.
 - **Interactive calendar** — month grid with due-dot markers, ENTER opens
   a per-week detail view with word-wrapped todo text.
-- **Sync** — bidirectional `POST /api/sync`: device uploads `done` /
-  `enabled` / importance flags, server merges and returns the
-  authoritative list. ETag/304 kept for legacy firmware.
+- **Two-way sync** — `POST /api/sync`: the device uploads only *locally
+  changed* flags (a persisted dirty-set), so edits made on the server
+  side survive the next sync instead of being clobbered. The server
+  merges and returns the authoritative lists; ETag/304 kept for legacy
+  firmware.
+- **Cron-aligned sync** — urgent polls fire at each :00/:30 wall-clock
+  boundary and full syncs at every `interval` boundary (top of the hour
+  for 1 h, :05 marks for 5 min, ...), driven by the RTC; the PCF8563 is
+  resynced over NTP once a day so the boundaries never drift.
+- **Full CJK font** — embedded GB2312 16×16/12×12 bitmaps (Noto Sans SC,
+  7445 characters) render Chinese in every screen, mixed with the
+  proportional ASCII fonts.
 - **USB + BLE control** — the same command protocol over both transports
   (`set_wifi`, `set_server`, `sync_now`, `get_status`, `clear_alarms`,
   `set_timezone`), see [`docs/control-protocol.md`](docs/control-protocol.md).
@@ -125,6 +134,7 @@ implemented; some flows still need a final on-device confirmation (see
 ## License
 
 [Apache-2.0](LICENSE). Includes the TRMNL16 proportional font (SIL Open
-Font License 1.1) and code ported from the official
-`itopinion/zectrix-note4-epd-demo` (MIT) — see `licenses/` and the
-`font8x16.rs` header for details.
+Font License 1.1), the Noto Sans SC CJK font (SIL Open Font License 1.1 —
+see `rust-firmware/assets/FONT_LICENSE.txt`), and code ported from the
+official `itopinion/zectrix-note4-epd-demo` (MIT) — see `licenses/` and
+the `font8x16.rs` header for details.
