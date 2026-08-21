@@ -26,10 +26,13 @@ structured JSON over Wi-Fi — the device is not an image-serving thin client.
   one-shot schedules, rung offline by the PCF8563 hardware alarm.
 - **Todos** — importance (low/med/high), due dates, repeat schedules,
   one-shot reminders for high-priority items.
+- **Inbox** — notifications pushed from external sources (webhooks, agents,
+  CI) via the server; browse, open, mark read. An unread badge shows on the
+  home screen, and `alert`-kind items ring a full-screen reminder.
 - **Config** — Wi-Fi / server / timezone pushed over USB serial or BLE by
   the desktop tool; no on-device text input.
 
-![Calendar](docs/screenshots/calendar.png) ![Week view](docs/screenshots/week-view.png)
+![Calendar](docs/screenshots/calendar.png) ![Week view](docs/screenshots/week-view.png) ![Inbox](docs/screenshots/inbox.png)
 
 ## Architecture
 
@@ -93,9 +96,12 @@ espflash flash --port /dev/tty.usbmodem1101 \
 - **USB + BLE control** — the same command protocol over both transports
   (`set_wifi`, `set_server`, `sync_now`, `get_status`, `clear_alarms`,
   `set_timezone`), see [`docs/control-protocol.md`](docs/control-protocol.md).
-- **e-paper UI preview** — [`scripts/ui_preview.rs`](scripts/ui_preview.rs)
-  renders every screen to PNG using the real font/icon tables, so UI
-  changes can be reviewed without flashing.
+- **Inbox** — the device pulls notifications from the server over the same
+  sync endpoint; the server accepts webhook deliveries per channel (see the
+  server repo's `channels.md`).
+- **e-paper UI preview** — [`tools/preview`](tools/preview) renders every
+  screen to PNG using the real font/icon tables, so UI changes can be
+  reviewed without flashing.
 
 ## Repository layout
 

@@ -95,10 +95,14 @@ pub fn render(
         };
         let label_w = Canvas::text_prop_width(&label, 1);
         let box_w = label_w + 12;
-        let box_h = 17usize;
+        // The 8x16 glyph is 16px tall, so a box that starts at the same y as
+        // the text would clip it. Give the box 2px of padding top and bottom
+        // and center the 16px text inside it.
+        let box_y = 5usize;
+        let box_h = 20usize;
         let box_x = cursor_x.saturating_sub(CLUSTER_GAP + box_w);
-        canvas.stroke_rect(box_x, 6, box_w, box_h, 2);
-        canvas.draw_text_prop(box_x + 6, 11, 1, &label);
+        canvas.stroke_rect(box_x, box_y, box_w, box_h, 2);
+        canvas.draw_text_prop(box_x + 6, box_y + 2, 1, &label);
     }
 
     canvas.fill_rect(16, 29, WIDTH - 32, 1, true);
