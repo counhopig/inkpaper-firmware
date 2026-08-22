@@ -9,27 +9,13 @@ use esp_idf_svc::systime::EspSystemTime;
 
 use crate::board::Note4Board;
 use crate::button::{ButtonEvent, POLL_INTERVAL_MS};
-use crate::control::Reply;
 use crate::inbox::InboxStore;
 use crate::rtc::DateTime;
 use crate::screens;
 use crate::storage::PersistedCounters;
 use crate::todos::{Importance, Todo, TodoStore};
-use crate::usb_console::{self, UsbConsole};
+use crate::usb_console::{reject_pending_command, UsbConsole};
 use crate::{ui, watchdog};
-
-/// Drains one queued USB command (if any) and replies `busy` without
-/// executing it. Called from every reminder ring loop so a PC tool gets an
-/// immediate, unambiguous reply instead of silence until the user dismisses
-/// the screen - see docs/control-protocol.md's `Busy` reply. BLE has the
-/// same silent-defer limitation but isn't wired up here yet (BLE control
-/// isn't reachable from this call path); see remaining-work.md.
-fn reject_pending_usb_command(usb: &mut UsbConsole) {
-    if let Some((id, _cmd)) = usb.poll_command() {
-        log::info!("Reminder active; replying busy to a queued USB command");
-        usb_console::write_reply(&Reply::Busy, id.as_deref());
-    }
-}
 
 const URGENT_RING_MAX_SECS: u64 = 120;
 
@@ -117,7 +103,7 @@ fn show_due_todos(board: &mut Note4Board, due: &[&Todo], usb: &mut UsbConsole) {
     }
     loop {
         watchdog::feed();
-        reject_pending_usb_command(usb);
+        reject_pending_command(usb);
         if board
             .key_enter
             .poll()
@@ -180,7 +166,7 @@ fn show_urgent(board: &mut Note4Board, titles: &[String], usb: &mut UsbConsole) 
     let ring_start = EspSystemTime {}.now();
     loop {
         watchdog::feed();
-        reject_pending_usb_command(usb);
+        reject_pending_command(usb);
         board.key_enter.poll();
         if board.key_enter.is_pressed() {
             while board.key_enter.poll().is_some() {}
@@ -204,7 +190,7 @@ fn show_urgent(board: &mut Note4Board, titles: &[String], usb: &mut UsbConsole) 
         let poll_deadline = EspSystemTime {}.now() + Duration::from_millis(400);
         loop {
             watchdog::feed();
-            reject_pending_usb_command(usb);
+            reject_pending_command(usb);
             board.key_enter.poll();
             if board.key_enter.is_pressed() {
                 while board.key_enter.poll().is_some() {}

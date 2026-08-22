@@ -76,4 +76,17 @@ impl Button {
     pub fn is_pressed(&self) -> bool {
         self.debounced
     }
+
+    /// Instantaneous pin level, bypassing debounce entirely - `true` means
+    /// the pin currently reads low (pressed, given `Pull::Up`). Only for a
+    /// dismiss check where a false positive from electrical noise (a screen
+    /// exits a poll cycle early) is far cheaper than a false negative (a
+    /// safety-critical alarm the user cannot silence): observed on hardware
+    /// needing a hold of over a second to satisfy `DEBOUNCE_SAMPLES`
+    /// (`is_pressed`) before it would report pressed at all, on a button
+    /// this codebase otherwise treats as instant. Do not use this for
+    /// ordinary UI navigation, which should stay debounced.
+    pub fn is_raw_pressed(&self) -> bool {
+        self.pin.is_low()
+    }
 }

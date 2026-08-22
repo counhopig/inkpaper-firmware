@@ -122,3 +122,18 @@ pub fn write_reply(reply: &control::Reply, id: Option<&str>) {
     let json = control::render_reply(reply, id);
     println!("{REPLY_PREFIX}{json}");
 }
+
+/// Drains one queued USB command (if any) and replies `busy` without
+/// executing it. Called from every full-screen blocking loop (due-todo and
+/// urgent-inbox reminders, the RTC alarm ring screen) so a PC tool gets an
+/// immediate, unambiguous reply instead of silence until the screen is
+/// dismissed - see docs/control-protocol.md's `Busy` reply. BLE has the same
+/// silent-defer limitation but isn't wired up here yet (`BleControl` isn't
+/// reachable from these call paths - it's owned by `main.rs`, not
+/// `DeviceContext`); see remaining-work.md.
+pub fn reject_pending_command(usb: &mut UsbConsole) {
+    if let Some((id, _cmd)) = usb.poll_command() {
+        log::info!("Blocking screen active; replying busy to a queued USB command");
+        write_reply(&control::Reply::Busy, id.as_deref());
+    }
+}

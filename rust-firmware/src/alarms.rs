@@ -11,9 +11,10 @@ use std::thread;
 use std::time::Duration;
 
 use crate::board::Note4Board;
-use crate::button::{ButtonEvent, POLL_INTERVAL_MS};
+use crate::button::POLL_INTERVAL_MS;
 use crate::canvas::Canvas;
 use crate::rtc::{is_leap, AlarmRegs, DateTime, Pcf8563};
+use crate::usb_console::{reject_pending_command, UsbConsole};
 use crate::{ui, watchdog};
 
 const NAMESPACE: &str = "inkwash_alrm";
@@ -164,9 +165,10 @@ impl AlarmStore {
 pub fn handle_fired_alarm(
     board: &mut Note4Board,
     alarm_store: &AlarmStore,
+    usb: &mut UsbConsole,
     now: Option<&DateTime>,
 ) -> Result<()> {
-    ring_until_dismissed(board)?;
+    ring_until_dismissed(board, usb)?;
     board.rtc.ack_alarm()?;
 
     if let Some(now) = now {
@@ -182,7 +184,7 @@ pub fn handle_fired_alarm(
 
 /// Draws the alarm screen, then alternates short tone bursts with polling
 /// ENTER until dismissed or the safety timeout elapses.
-fn ring_until_dismissed(board: &mut Note4Board) -> Result<()> {
+fn ring_until_dismissed(board: &mut Note4Board, usb: &mut UsbConsole) -> Result<()> {
     let canvas = board.display.canvas_mut();
     canvas.clear();
     ui::header(canvas, "ALARM");
@@ -196,14 +198,17 @@ fn ring_until_dismissed(board: &mut Note4Board) -> Result<()> {
     let start = EspSystemTime {}.now();
     loop {
         watchdog::feed();
-        if let Some(ButtonEvent::Pressed) = board.key_enter.poll() {
+        reject_pending_command(usb);
+        board.key_enter.poll();
+        if board.key_enter.is_raw_pressed() {
+            while board.key_enter.poll().is_some() {}
             log::info!("Alarm dismissed");
-            break;
+            return Ok(());
         }
         let elapsed = EspSystemTime {}.now().saturating_sub(start);
         if elapsed >= Duration::from_secs(MAX_RING_SECS) {
             log::warn!("Alarm ring timed out after {MAX_RING_SECS}s with no dismiss");
-            break;
+            return Ok(());
         }
         if let Some(audio) = board.audio.as_mut() {
             if let Err(err) = audio.play_sine_stereo(880.0, 0.05, 8000) {
@@ -212,8 +217,30 @@ fn ring_until_dismissed(board: &mut Note4Board) -> Result<()> {
         } else {
             thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
         }
+        // `play_sine_stereo` blocks for ~210ms per call (see
+        // audio.rs::drain_and_disable's unconditional 150ms drain sleep),
+        // so polling the button only once per tone (as this loop used to)
+        // samples it roughly every 210ms - a quick press entirely inside
+        // that gap was invisible to the debounce state machine, which only
+        // advances when `poll()` is actually called. Matches
+        // `reminders.rs::show_urgent`'s already-verified pattern: a tight
+        // 20ms-granularity poll window between tones instead.
+        let poll_deadline = EspSystemTime {}.now() + Duration::from_millis(400);
+        loop {
+            watchdog::feed();
+            reject_pending_command(usb);
+            board.key_enter.poll();
+            if board.key_enter.is_pressed() {
+                while board.key_enter.poll().is_some() {}
+                log::info!("Alarm dismissed");
+                return Ok(());
+            }
+            if (EspSystemTime {}).now() >= poll_deadline {
+                break;
+            }
+            thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
+        }
     }
-    Ok(())
 }
 
 /// Absolute day number (proleptic Gregorian, epoch 1970-01-01) - only used

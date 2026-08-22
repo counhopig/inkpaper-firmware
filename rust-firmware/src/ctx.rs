@@ -177,9 +177,12 @@ impl DeviceContext<'_> {
         match self.board.rtc.alarm_flag() {
             Ok(true) => {
                 log::info!("RTC alarm fired while device was awake; ringing");
-                if let Err(err) =
-                    crate::alarms::handle_fired_alarm(self.board, self.alarm_store, Some(now))
-                {
+                if let Err(err) = crate::alarms::handle_fired_alarm(
+                    self.board,
+                    self.alarm_store,
+                    self.usb_console,
+                    Some(now),
+                ) {
                     log::error!("Failed to handle live RTC alarm: {err}");
                 }
                 self.alarm_scheduler.rearm_after_minute = Some(current_minute);

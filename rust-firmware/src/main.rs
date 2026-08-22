@@ -160,7 +160,7 @@ fn main() -> Result<()> {
     let alarm_fired_at_boot = power::wake_cause() == power::WakeCause::RtcAlarm;
     if alarm_fired_at_boot {
         log::info!("Woke from RTC alarm; ringing");
-        alarms::handle_fired_alarm(&mut board, &alarm_store, clock.as_ref())?;
+        alarms::handle_fired_alarm(&mut board, &alarm_store, &mut usb_console, clock.as_ref())?;
     }
 
     // Keep the PCF8563's single hardware alarm slot pointed at whichever
