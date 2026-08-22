@@ -1,7 +1,7 @@
 # Firmware Remaining Work
 
 Updated: 2026-08-22  
-Flashed revision: `<pending: weekday-fix commit>` (`main`)
+Flashed revision: `2455cb8` (`main`)
 
 ## Newly discovered from desktop/device logs
 
