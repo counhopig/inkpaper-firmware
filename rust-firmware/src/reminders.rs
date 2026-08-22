@@ -9,12 +9,27 @@ use esp_idf_svc::systime::EspSystemTime;
 
 use crate::board::Note4Board;
 use crate::button::{ButtonEvent, POLL_INTERVAL_MS};
+use crate::control::Reply;
 use crate::inbox::InboxStore;
 use crate::rtc::DateTime;
 use crate::screens;
 use crate::storage::PersistedCounters;
 use crate::todos::{Importance, Todo, TodoStore};
+use crate::usb_console::{self, UsbConsole};
 use crate::{ui, watchdog};
+
+/// Drains one queued USB command (if any) and replies `busy` without
+/// executing it. Called from every reminder ring loop so a PC tool gets an
+/// immediate, unambiguous reply instead of silence until the user dismisses
+/// the screen - see docs/control-protocol.md's `Busy` reply. BLE has the
+/// same silent-defer limitation but isn't wired up here yet (BLE control
+/// isn't reachable from this call path); see remaining-work.md.
+fn reject_pending_usb_command(usb: &mut UsbConsole) {
+    if usb.poll_command().is_some() {
+        log::info!("Reminder active; replying busy to a queued USB command");
+        usb_console::write_reply(&Reply::Busy);
+    }
+}
 
 const URGENT_RING_MAX_SECS: u64 = 120;
 
@@ -25,10 +40,11 @@ pub fn poll(
     counters: &PersistedCounters,
     todo_store: &TodoStore,
     inbox_store: &InboxStore,
+    usb: &mut UsbConsole,
     now: &DateTime,
 ) -> bool {
-    let urgent_shown = remind_urgent_inbox(board, inbox_store);
-    let todo_shown = remind_due_todos(board, counters, todo_store, now);
+    let urgent_shown = remind_urgent_inbox(board, inbox_store, usb);
+    let todo_shown = remind_due_todos(board, counters, todo_store, usb, now);
     urgent_shown || todo_shown
 }
 
@@ -36,6 +52,7 @@ fn remind_due_todos(
     board: &mut Note4Board,
     counters: &PersistedCounters,
     todo_store: &TodoStore,
+    usb: &mut UsbConsole,
     now: &DateTime,
 ) -> bool {
     let date_key = format!("{:04}{:02}{:02}", now.year, now.month, now.day);
@@ -71,11 +88,11 @@ fn remind_due_todos(
         return false;
     }
     log::info!("{} high-importance todo(s) due today; reminding", due.len());
-    show_due_todos(board, &due);
+    show_due_todos(board, &due, usb);
     true
 }
 
-fn show_due_todos(board: &mut Note4Board, due: &[&Todo]) {
+fn show_due_todos(board: &mut Note4Board, due: &[&Todo], usb: &mut UsbConsole) {
     let canvas = board.display.canvas_mut();
     canvas.clear();
     ui::header(canvas, "TODOS DUE");
@@ -100,6 +117,7 @@ fn show_due_todos(board: &mut Note4Board, due: &[&Todo]) {
     }
     loop {
         watchdog::feed();
+        reject_pending_usb_command(usb);
         if board
             .key_enter
             .poll()
@@ -111,7 +129,11 @@ fn show_due_todos(board: &mut Note4Board, due: &[&Todo]) {
     }
 }
 
-fn remind_urgent_inbox(board: &mut Note4Board, inbox_store: &InboxStore) -> bool {
+fn remind_urgent_inbox(
+    board: &mut Note4Board,
+    inbox_store: &InboxStore,
+    usb: &mut UsbConsole,
+) -> bool {
     let Ok(list) = inbox_store.load() else {
         return false;
     };
@@ -131,11 +153,11 @@ fn remind_urgent_inbox(board: &mut Note4Board, inbox_store: &InboxStore) -> bool
         .map(|item| screens::truncate_prop(&item.title, 330))
         .collect();
     log::info!("{} urgent inbox message(s) to show", titles.len());
-    show_urgent(board, &titles);
+    show_urgent(board, &titles, usb);
     true
 }
 
-fn show_urgent(board: &mut Note4Board, titles: &[String]) {
+fn show_urgent(board: &mut Note4Board, titles: &[String], usb: &mut UsbConsole) {
     let canvas = board.display.canvas_mut();
     canvas.clear();
     ui::header(canvas, "URGENT");
@@ -158,6 +180,7 @@ fn show_urgent(board: &mut Note4Board, titles: &[String]) {
     let ring_start = EspSystemTime {}.now();
     loop {
         watchdog::feed();
+        reject_pending_usb_command(usb);
         board.key_enter.poll();
         if board.key_enter.is_pressed() {
             while board.key_enter.poll().is_some() {}
@@ -181,6 +204,7 @@ fn show_urgent(board: &mut Note4Board, titles: &[String]) {
         let poll_deadline = EspSystemTime {}.now() + Duration::from_millis(400);
         loop {
             watchdog::feed();
+            reject_pending_usb_command(usb);
             board.key_enter.poll();
             if board.key_enter.is_pressed() {
                 while board.key_enter.poll().is_some() {}

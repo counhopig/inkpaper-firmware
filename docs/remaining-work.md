@@ -5,29 +5,33 @@ Flashed revision: `86a7f57` (`main`)
 
 ## Newly discovered from desktop/device logs
 
-1. **P0 — Todo reminder date cannot be persisted.** The NVS key
-   `todo_reminded_date` is 18 characters, but ESP-IDF NVS keys are limited to
-   15 characters. The device reports `ESP_ERR_NVS_KEY_TOO_LONG`, so the same
-   high-priority Todo is presented repeatedly. Rename the key to a stable name
-   of at most 15 characters (for example `todo_rem_date`). No migration is
-   required because the invalid old key could never have been written.
-2. **P0 — A persistence failure still presents the reminder.**
-   `reminders.rs` logs a failure from `set_todo_reminded_date` and continues to
-   ring. It must abort presentation when the de-duplication marker cannot be
-   stored; otherwise any future NVS failure recreates the same infinite alert
-   loop even after the key-length bug is fixed.
-3. **P1 — Long reminder screens delay USB replies.** The repeated Todo alert
-   blocks command dispatch long enough that desktop `sync_now` requests and
-   replies become difficult to correlate. After fixing the P0 loop, verify the
-   45-second desktop command timeout against a deliberately active reminder.
-   The desktop should either expose a clear “dismiss alert on device” state or
-   the firmware should return an explicit busy response instead of silently
-   delaying a command.
+1. ~~**P0 — Todo reminder date cannot be persisted.**~~ **Fixed.** NVS key
+   renamed `todo_reminded_date` (18 chars) -> `todo_rem_date` (13 chars); see
+   `storage.rs`. Not yet verified on physical hardware.
+2. ~~**P0 — A persistence failure still presents the reminder.**~~ **Fixed.**
+   `remind_due_todos` now returns without ringing when
+   `set_todo_reminded_date` fails; see `reminders.rs`.
+3. **P1 — Long reminder screens delay USB replies.** *Partially fixed:* the
+   due-todo and urgent-inbox reminder loops in `reminders.rs` now poll the USB
+   console and reply `{"status":"busy"}` (dropping, not queueing, the command)
+   instead of leaving the client waiting in silence — see the `Busy` reply in
+   `control-protocol.md`. Still open: the RTC alarm-ringing screen
+   (`alarms.rs::ring_until_dismissed`) has the identical blocking pattern but
+   was not wired up to the same fix (out of scope of this pass — it's called
+   from a pre-`DeviceContext` boot path in `main.rs` in addition to the normal
+   runtime path, so threading `UsbConsole` through it needs its own look).
+   BLE is also untouched: `BleControl` isn't reachable from `reminders.rs`'s
+   call path (it's owned by `main.rs`, not `DeviceContext`), so BLE commands
+   during a reminder still get no reply at all, not even `busy`. Still need to
+   verify the 45s desktop command timeout behaves sanely against a live
+   reminder now that a prompt reply exists.
 4. **P1 — Command correlation is implicit.** The serial protocol has no
    request ID, so a late reply can be consumed by whichever desktop request is
    currently waiting. Add request IDs to a backward-compatible protocol
    version, or enforce exactly one in-flight command and quarantine replies
-   received after a timeout before permitting another command.
+   received after a timeout before permitting another command. Not started —
+   this needs a coordinated change with `inkwash-desktop` (the client side),
+   not just firmware.
 5. **P2 — Startup status is requested more than once.** During the USB reset
    and boot sequence the desktop sends `get_status` twice and receives two
    valid status replies. This is not a firmware failure, but the UI/logging

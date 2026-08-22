@@ -129,6 +129,25 @@ Command succeeded. No additional data.
 
 ---
 
+#### `{"status":"busy"}`
+
+A command arrived over USB while a full-screen due-todo or urgent-inbox
+reminder was actively ringing. The command was **not executed** — it is
+dropped, not queued. Retry after the reminder is dismissed (ENTER) or times
+out (120 s for urgent inbox reminders; due-todo reminders wait for ENTER
+indefinitely). This distinguishes "device is temporarily unavailable" from
+silence, so a client doesn't have to guess whether a request was lost.
+
+Only the due-todo and urgent-inbox reminder screens (`reminders.rs`) return
+this; commands are still silently deferred (no reply at all until the
+command is later drained) while the RTC alarm-ringing screen (`alarms.rs`)
+or a BLE-only menu screen is showing — see Limitations below.
+
+**Fields:**
+- **`status`** (string, required): `"busy"`
+
+---
+
 #### `{"status":"error","message":"ERROR_DESCRIPTION"}`
 
 Command failed. The `message` field contains a human-readable description of
@@ -299,6 +318,16 @@ command execution, so a hung sync will eventually reboot the device.
 - Six commands are implemented: `set_wifi`, `set_server`, `sync_now`,
   `get_status`, `clear_alarms`, and `set_timezone`.
 - No rate limiting or command queueing; commands are dispatched as they arrive.
+- No request correlation ID: replies are matched to whichever request the
+  client is currently waiting on. A client should keep exactly one command
+  in flight at a time and treat a reply arriving after its own timeout as
+  suspect (it may belong to a stale request) rather than assuming it
+  matches the most recent one sent.
+- The `busy` reply (see Replies above) only covers the due-todo and
+  urgent-inbox reminder screens. The RTC alarm-ringing screen and BLE-only
+  menu screens still silently defer USB/BLE commands until dispatch resumes
+  - a client can't yet tell "device busy, will reply soon" apart from
+  "device unreachable" in those cases.
 - `UsbConsole` has no dedicated reader task. Home and the long-lived content
   pages and interactive pickers poll it non-blockingly. Input lines are capped
   at 512 bytes so a broken client cannot grow the firmware heap without bound.

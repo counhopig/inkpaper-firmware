@@ -51,6 +51,11 @@ pub enum Reply {
     /// Command succeeded.
     Ok,
 
+    /// A command arrived while a full-screen reminder (due-todo or urgent
+    /// inbox) was actively ringing. It was not executed; the client should
+    /// retry after the user dismisses the reminder or it times out.
+    Busy,
+
     /// Device status snapshot.
     Status {
         wifi_configured: bool,

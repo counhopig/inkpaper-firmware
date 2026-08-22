@@ -134,6 +134,7 @@ impl DeviceContext<'_> {
             self.counters,
             self.todo_store,
             self.inbox_store,
+            self.usb_console,
             now,
         )
     }
