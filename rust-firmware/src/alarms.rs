@@ -266,9 +266,9 @@ pub(crate) fn date_from_days(mut days: i64) -> (u16, u8, u8) {
 }
 
 /// Weekday (0=Sunday..6=Saturday) for an absolute day number. 1970-01-01
-/// was a Thursday (3).
+/// was a Thursday (4).
 fn weekday_from_days(days: i64) -> u8 {
-    ((days + 3).rem_euclid(7)) as u8
+    ((days + 4).rem_euclid(7)) as u8
 }
 
 /// The next calendar date (year, month, day, weekday) that `repeat` covers,

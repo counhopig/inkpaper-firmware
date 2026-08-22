@@ -50,7 +50,7 @@ impl DateTime {
         let hour = (secs / 3600) as u8;
         let minute = ((secs % 3600) / 60) as u8;
         let second = (secs % 60) as u8;
-        let weekday = ((epoch / 86400 + 3) % 7) as u8; // 1970-01-01 was Thursday
+        let weekday = ((epoch / 86400 + 4) % 7) as u8; // 1970-01-01 was Thursday (0=Sunday..6=Saturday)
         Self {
             year: year as u16,
             month,

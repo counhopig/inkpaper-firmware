@@ -1,10 +1,30 @@
 # Firmware Remaining Work
 
 Updated: 2026-08-22  
-Flashed revision: `18d1904` (`main`)
+Flashed revision: `<pending: weekday-fix commit>` (`main`)
 
 ## Newly discovered from desktop/device logs
 
+0. ~~**P0 — Weekday is off by one everywhere.**~~ **Fixed and verified on
+   physical hardware** (2026-08-22, user-reported): device showed Friday on
+   a Saturday. Both epoch-to-weekday conversions
+   (`rtc::DateTime::from_unix`, `alarms::weekday_from_days`) used `(days +
+   3) % 7`; 1970-01-01 (a Thursday) is `4` under the codebase's documented
+   `0=Sunday..6=Saturday` convention, not `3` - confirmed against 5 known
+   reference dates in a standalone check. `screens::weekday_of` (the
+   calendar grid) was never affected - it independently computes weekday
+   via Sakamoto's algorithm and its own comment notes it deliberately
+   doesn't read `DateTime.weekday`, which in hindsight reads like the
+   original author already distrusted that field. Every other consumer
+   (Home's weekday label, `Repeat::Weekly` alarm/todo matching, the PCF8563
+   hardware alarm's weekday match register) was wrong by one day.
+   **Note for whoever's on call next:** the PCF8563 has its own free-running
+   weekday register, only rewritten on `write_time()` (NTP resync, boot
+   reseed after power loss, `set_timezone`) - flashing the fix alone does
+   not retroactively correct an already-stored bad value. Fixed here by
+   sending `set_timezone` with the device's existing offset (480) right
+   after flashing, which forces a `read -> recompute via from_unix -> write`
+   cycle without needing a full NTP resync.
 1. ~~**P0 — Todo reminder date cannot be persisted.**~~ **Fixed and verified
    on physical hardware** (2026-08-22): synced a real high-priority due-today
    Todo down from the server; the device rang `TODOS DUE` once with no
