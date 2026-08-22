@@ -1,7 +1,7 @@
 # Firmware Remaining Work
 
 Updated: 2026-08-22  
-Flashed revision: `22dd01d` (`main`)
+Flashed revision: `18d1904` (`main`)
 
 ## Newly discovered from desktop/device logs
 
