@@ -1,13 +1,16 @@
 # Firmware Remaining Work
 
-Updated: 2026-08-21  
-Flashed revision: `86a7f57` (`main`)
+Updated: 2026-08-22  
+Flashed revision: `65a9be7` (`main`)
 
 ## Newly discovered from desktop/device logs
 
-1. ~~**P0 — Todo reminder date cannot be persisted.**~~ **Fixed.** NVS key
-   renamed `todo_reminded_date` (18 chars) -> `todo_rem_date` (13 chars); see
-   `storage.rs`. Not yet verified on physical hardware.
+1. ~~**P0 — Todo reminder date cannot be persisted.**~~ **Fixed and verified
+   on physical hardware** (2026-08-22): synced a real high-priority due-today
+   Todo down from the server; the device rang `TODOS DUE` once with no
+   `ESP_ERR_NVS_KEY_TOO_LONG` in the log. NVS key renamed
+   `todo_reminded_date` (18 chars) -> `todo_rem_date` (13 chars); see
+   `storage.rs`.
 2. ~~**P0 — A persistence failure still presents the reminder.**~~ **Fixed.**
    `remind_due_todos` now returns without ringing when
    `set_todo_reminded_date` fails; see `reminders.rs`.
@@ -22,9 +25,11 @@ Flashed revision: `86a7f57` (`main`)
    runtime path, so threading `UsbConsole` through it needs its own look).
    BLE is also untouched: `BleControl` isn't reachable from `reminders.rs`'s
    call path (it's owned by `main.rs`, not `DeviceContext`), so BLE commands
-   during a reminder still get no reply at all, not even `busy`. Still need to
-   verify the 45s desktop command timeout behaves sanely against a live
-   reminder now that a prompt reply exists.
+   during a reminder still get no reply at all, not even `busy`.
+   **Verified on physical hardware** (2026-08-22): sent `get_status` over USB
+   while the due-todo reminder from item 1 was actively ringing and got
+   `{"status":"busy"}` back in a few seconds - well inside the 45s desktop
+   timeout, and no more silent hang.
 4. **P1 — Command correlation is implicit.** The serial protocol has no
    request ID, so a late reply can be consumed by whichever desktop request is
    currently waiting. Add request IDs to a backward-compatible protocol
@@ -37,6 +42,22 @@ Flashed revision: `86a7f57` (`main`)
    valid status replies. This is not a firmware failure, but the UI/logging
    should coalesce identical startup probes so users do not mistake them for
    duplicate actions.
+6. **P2 — `esp-idf-svc` 0.52.1 always associates with PMF advertised as
+   unsupported, ignoring `ClientConfiguration.pmf_cfg`.** Root-caused
+   2026-08-22 on hardware: a router with WPA2/WPA3-mixed + PMF-required
+   rejected the device shortly after association (`assoc -> init` right
+   after the `Wi-Fi connected` log line, before DHCP could run), while the
+   same router in WPA2-only mode connected cleanly. Traced to
+   `esp-idf-svc-0.52.1/src/wifi.rs`'s
+   `TryFrom<&ClientConfiguration> for Newtype<wifi_sta_config_t>`, which
+   hardcodes `wifi_pmf_config_t { capable: false, required: false }` and
+   never reads `conf.pmf_cfg` — so nothing `wifi.rs::connect()` sets on the
+   Rust side can change it. Workaround for now: use a WPA2-only network (or
+   WPA2/WPA3-mixed with PMF optional, not required). A real fix needs either
+   an `esp-idf-svc` upgrade past this bug, or bypassing `set_configuration()`
+   for STA the same way `connect()`/`disconnect()` already bypass the
+   wrapper - build and pass a `wifi_config_t` with `pmf_cfg.capable = true`
+   directly to `esp_wifi_set_config()`. Not started.
 
 The same log also confirms that consecutive scan-free Wi-Fi connections work
 within one boot, HTTPS certificate validation succeeds, and a full sync applies
@@ -56,6 +77,30 @@ issues above.
   refreshes.
 - An aligned background network cycle connected, obtained DHCP and validated
   the HTTPS certificate after boot.
+
+### 2026-08-22 hardware pass (items 1 and 3 above)
+
+- `set_wifi` reconfigured live (previous stored network was unreachable from
+  this location); verification correctly rejected a bad DHCP-timeout attempt
+  before saving, then saved once a working network connected - see item 6 for
+  the PMF root cause of the first attempt's failure.
+- `sync_now` over USB pulled 2 Todos from the live server (0 alarms, 0 inbox);
+  `Wi-Fi already used this boot session; attempting a second connect
+  (scan-free)` fired twice more in the same boot (once for `sync_now`, once
+  for the next urgent-poll boundary) and both reconnected and completed
+  cleanly - the documented "multiple connects per boot are safe" fix in
+  `wifi.rs` still holds.
+- The due-Todo reminder fired exactly once (item 1) and, while it was
+  actively ringing, a `get_status` sent over USB got `{"status":"busy"}`
+  back (item 3) instead of hanging silently.
+- Opening the USB serial port with a naive client (pyserial's default
+  `Serial(port, ...)` constructor, which asserts DTR/RTS before the caller
+  can change them) reliably resets the chip - a full reboot from the
+  bootloader, not just the documented spurious-ENTER GPIO0 pull. Not a
+  firmware bug (same auto-reset circuit `espflash` itself relies on to
+  attach), but `control-protocol.md`'s existing warning undersells the
+  effect; worth a doc pass for PC-tool authors on setting `dtr`/`rts` to
+  `False` *before* opening the port.
 
 ## Required physical-device verification
 
@@ -83,9 +128,19 @@ issues above.
 3. Fix stale ESP-IDF application metadata. The boot log's `App version` and
    `Compile time` can come from the cached `esp-idf-sys` CMake build instead of
    the Rust firmware revision just linked and flashed. Embed the Git revision
-   from `build.rs` or force the application descriptor to rebuild.
+   from `build.rs` or force the application descriptor to rebuild. Observed
+   directly 2026-08-22: booted a `65a9be7` flash and the log still printed
+   `App version: v0.3.0-14-g71062c9-dirty` (a commit two pushes back).
 4. Replace machine-specific ESP-IDF, Python and rust-analyzer paths with a
-   documented local bootstrap/configuration mechanism.
+   documented local bootstrap/configuration mechanism. *Partially done*
+   (2026-08-22): `LIBCLANG_PATH` no longer needs a hardcoded per-developer
+   path in `rust-firmware/.cargo/config.toml` - `scripts/build-rust.sh`/
+   `.ps1` now locate it dynamically under the active `esp` rustup toolchain
+   (verified end-to-end on Linux with a clean `target/` rebuild; the
+   PowerShell side is unverified - no Windows machine available). Still
+   open: `.vscode/settings.json` (rust-analyzer paths) and the `IDF_PATH`
+   fallback in `config.toml` remain machine-specific; the former was
+   untracked from git so per-developer edits stop showing up as diffs.
 5. Design and implement OTA with signed images, health confirmation and a
    rollback partition before enabling remote firmware upgrades.
 
