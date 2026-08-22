@@ -83,13 +83,13 @@ impl DeviceContext<'_> {
     /// successful command may have changed visible device state and the
     /// current screen should redraw from its stores/RTC.
     pub fn poll_usb_control(&mut self, now: Option<&DateTime>) -> bool {
-        let Some(cmd) = self.usb_console.poll_command() else {
+        let Some((id, cmd)) = self.usb_console.poll_command() else {
             return false;
         };
         let changes_visible_state = !matches!(cmd, Command::GetStatus);
         let fresh_now = self.board.rtc.read_time().ok();
         let reply = control::dispatch(self, cmd, fresh_now.as_ref().or(now));
-        crate::usb_console::write_reply(&reply);
+        crate::usb_console::write_reply(&reply, id.as_deref());
         changes_visible_state && matches!(reply, Reply::Ok)
     }
 

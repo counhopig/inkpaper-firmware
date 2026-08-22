@@ -40,10 +40,12 @@ pub struct UsbConsole {
     line_buf: Vec<u8>,
     discarding_oversized_line: bool,
     /// Commands already parsed out of a previous read but not yet returned
-    /// to the caller. A single 128-byte read can contain more than one
-    /// complete `>>IW ...\n` line; every one of them is parsed here so none
-    /// are lost, and `poll_command()` hands them out one at a time.
-    pending: VecDeque<control::Command>,
+    /// to the caller, paired with each one's optional client-supplied
+    /// correlation `id` (see `control::parse_command`). A single 128-byte
+    /// read can contain more than one complete `>>IW ...\n` line; every one
+    /// of them is parsed here so none are lost, and `poll_command()` hands
+    /// them out one at a time.
+    pending: VecDeque<(Option<String>, control::Command)>,
 }
 
 impl UsbConsole {
@@ -55,11 +57,12 @@ impl UsbConsole {
         }
     }
 
-    /// Non-blocking poll for the next command. Returns `Some(Command)` if a
-    /// complete command line was received and parsed successfully, or `None`
-    /// if there are no queued commands, or if a line was queued but failed to
+    /// Non-blocking poll for the next command. Returns `Some((id, Command))`
+    /// if a complete command line was received and parsed successfully
+    /// (`id` is the client's correlation id, if it sent one), or `None` if
+    /// there are no queued commands, or if a line was queued but failed to
     /// parse (in which case a warning is logged).
-    pub fn poll_command(&mut self) -> Option<control::Command> {
+    pub fn poll_command(&mut self) -> Option<(Option<String>, control::Command)> {
         if let Some(cmd) = self.pending.pop_front() {
             return Some(cmd);
         }
@@ -83,7 +86,7 @@ impl UsbConsole {
                         self.line_buf.clear();
                         if let Some(json) = line.strip_prefix(COMMAND_PREFIX) {
                             match control::parse_command(json) {
-                                Ok(cmd) => self.pending.push_back(cmd),
+                                Ok(parsed) => self.pending.push_back(parsed),
                                 Err(err) => {
                                     log::warn!("USB console: failed to parse command: {err}");
                                 }
@@ -112,9 +115,10 @@ impl UsbConsole {
     }
 }
 
-/// Write a reply back to the PC tool, framed with the `<<IW ` prefix.
-/// This should be called from the main loop after dispatching a command.
-pub fn write_reply(reply: &control::Reply) {
-    let json = control::render_reply(reply);
+/// Write a reply back to the PC tool, framed with the `<<IW ` prefix, echoing
+/// back the triggering command's correlation `id` if it had one. This should
+/// be called from the main loop after dispatching a command.
+pub fn write_reply(reply: &control::Reply, id: Option<&str>) {
+    let json = control::render_reply(reply, id);
     println!("{REPLY_PREFIX}{json}");
 }

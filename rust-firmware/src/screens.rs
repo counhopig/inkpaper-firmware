@@ -1268,10 +1268,10 @@ fn ble_pairing_screen(
             let mut last_alarm_poll = std::time::Instant::now();
             loop {
                 let _ = ctx.poll_usb_control(now);
-                if let Some(cmd) = ble_control.as_ref().and_then(|ble| ble.poll_command()) {
+                if let Some((id, cmd)) = ble_control.as_ref().and_then(|ble| ble.poll_command()) {
                     let reply = crate::control::dispatch(ctx, cmd, now);
                     if let Some(ble) = ble_control.as_ref() {
-                        ble.write_reply(&reply);
+                        ble.write_reply(&reply, id.as_deref());
                     }
                 }
                 // This is a passive status page with no confirm action, so

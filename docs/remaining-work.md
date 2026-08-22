@@ -1,7 +1,7 @@
 # Firmware Remaining Work
 
 Updated: 2026-08-22  
-Flashed revision: `9e7e9b3` (`main`)
+Flashed revision: `22dd01d` (`main`)
 
 ## Newly discovered from desktop/device logs
 
@@ -30,13 +30,17 @@ Flashed revision: `9e7e9b3` (`main`)
    while the due-todo reminder from item 1 was actively ringing and got
    `{"status":"busy"}` back in a few seconds - well inside the 45s desktop
    timeout, and no more silent hang.
-4. **P1 — Command correlation is implicit.** The serial protocol has no
-   request ID, so a late reply can be consumed by whichever desktop request is
-   currently waiting. Add request IDs to a backward-compatible protocol
-   version, or enforce exactly one in-flight command and quarantine replies
-   received after a timeout before permitting another command. Not started —
-   this needs a coordinated change with `inkwash-desktop` (the client side),
-   not just firmware.
+4. **P1 — Command correlation is implicit.** *Firmware side done*
+   (2026-08-22): commands may now carry an optional `id` (any string), echoed
+   back on the reply; omitted `id` means no wire-format change for old
+   clients. See the `Request Correlation` section in `control-protocol.md`,
+   `control::parse_command`/`render_reply`. Verified on hardware: a
+   `{"cmd":"get_status","id":"req-42"}` request got `"id":"req-42"` back; a
+   plain request with no `id` got a reply with no `id` field, byte-identical
+   to before this change. Still open: `inkwash-desktop` doesn't send or use
+   `id` yet - it needs to generate one per request, match replies against it,
+   and decide what "exactly one in-flight command" enforcement looks like on
+   its side. Not started there.
 5. **P2 — Startup status is requested more than once.** During the USB reset
    and boot sequence the desktop sends `get_status` twice and receives two
    valid status replies. This is not a firmware failure, but the UI/logging

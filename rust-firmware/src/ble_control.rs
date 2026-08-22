@@ -116,14 +116,15 @@ impl BleControl {
         })
     }
 
-    /// Non-blocking poll for the next BLE command. Returns `Some(Command)`
-    /// if a complete command was received and parsed successfully, or
-    /// `None` if there are no queued commands, or if one was queued but
+    /// Non-blocking poll for the next BLE command. Returns
+    /// `Some((id, Command))` if a complete command was received and parsed
+    /// successfully (`id` is the client's correlation id, if it sent one),
+    /// or `None` if there are no queued commands, or if one was queued but
     /// failed to parse (a warning is logged in that case).
-    pub fn poll_command(&self) -> Option<control::Command> {
+    pub fn poll_command(&self) -> Option<(Option<String>, control::Command)> {
         match self.rx.try_recv() {
             Ok(line) => match control::parse_command(&line) {
-                Ok(cmd) => Some(cmd),
+                Ok(parsed) => Some(parsed),
                 Err(err) => {
                     log::warn!("BLE: failed to parse command '{line}': {err}");
                     None
@@ -138,11 +139,13 @@ impl BleControl {
     }
 
     /// Sends a reply to the connected BLE client via the notify
-    /// characteristic. A no-op (from the client's perspective) if nothing
-    /// is connected/subscribed - NimBLE just drops notifications with no
-    /// subscriber rather than erroring, so there's nothing to propagate.
-    pub fn write_reply(&self, reply: &control::Reply) {
-        let json = control::render_reply(reply);
+    /// characteristic, echoing back the triggering command's correlation
+    /// `id` if it had one. A no-op (from the client's perspective) if
+    /// nothing is connected/subscribed - NimBLE just drops notifications
+    /// with no subscriber rather than erroring, so there's nothing to
+    /// propagate.
+    pub fn write_reply(&self, reply: &control::Reply, id: Option<&str>) {
+        let json = control::render_reply(reply, id);
         self.notify_char.lock().set_value(json.as_bytes()).notify();
     }
 }

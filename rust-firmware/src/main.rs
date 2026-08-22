@@ -341,13 +341,13 @@ fn main() -> Result<()> {
 
         // Poll BLE for incoming commands (if BLE is active), dispatch them, and send replies.
         if let Some(ble) = &ble_control {
-            if let Some(cmd) = ble.poll_command() {
+            if let Some((id, cmd)) = ble.poll_command() {
                 let needs_full_redraw = matches!(cmd, control::Command::SyncNow);
                 let reply = control::dispatch(&mut ctx, cmd, clock.as_ref());
                 if needs_full_redraw && matches!(reply, control::Reply::Ok) {
                     dirty.push(FULL_SCREEN_RECT);
                 }
-                ble.write_reply(&reply);
+                ble.write_reply(&reply, id.as_deref());
             }
         }
 

@@ -25,9 +25,9 @@ use crate::{ui, watchdog};
 /// same silent-defer limitation but isn't wired up here yet (BLE control
 /// isn't reachable from this call path); see remaining-work.md.
 fn reject_pending_usb_command(usb: &mut UsbConsole) {
-    if usb.poll_command().is_some() {
+    if let Some((id, _cmd)) = usb.poll_command() {
         log::info!("Reminder active; replying busy to a queued USB command");
-        usb_console::write_reply(&Reply::Busy);
+        usb_console::write_reply(&Reply::Busy, id.as_deref());
     }
 }
 

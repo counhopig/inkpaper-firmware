@@ -118,10 +118,25 @@ difference from the previous offset. Valid range: -720 (UTC-12:00) through 840
 
 ---
 
+### Request Correlation
+
+Any command may include an optional `id` field (any JSON string), e.g.
+`{"cmd":"get_status","id":"req-42"}`. If present, the device echoes it back
+as a top-level `id` field on the reply: `{"status":"status","id":"req-42",...}`.
+If a command omits `id`, its reply has no `id` field either - existing
+clients that never send one see no wire-format change.
+
+A client sending more than one command without waiting for each reply has no
+other way to tell which reply answers which request (see Limitations below),
+especially once the `busy` reply exists - a reminder screen can make several
+replies arrive close together. Set `id` and match on it rather than assuming
+replies arrive in the order requests were sent.
+
 ### Replies
 
 Replies are sent as JSON objects, one per line. Each reply has a `status` field
-indicating success or failure, plus status-specific fields.
+indicating success or failure, plus status-specific fields, plus `id` if the
+triggering command included one (see Request Correlation above).
 
 #### `{"status":"ok"}`
 
@@ -318,11 +333,14 @@ command execution, so a hung sync will eventually reboot the device.
 - Six commands are implemented: `set_wifi`, `set_server`, `sync_now`,
   `get_status`, `clear_alarms`, and `set_timezone`.
 - No rate limiting or command queueing; commands are dispatched as they arrive.
-- No request correlation ID: replies are matched to whichever request the
-  client is currently waiting on. A client should keep exactly one command
-  in flight at a time and treat a reply arriving after its own timeout as
-  suspect (it may belong to a stale request) rather than assuming it
-  matches the most recent one sent.
+- The optional `id` (see Request Correlation above) only labels which reply
+  answers which command; it does not make out-of-order replies impossible.
+  The device still processes and replies to commands strictly in arrival
+  order (one at a time, no internal queueing/reordering), so a client that
+  keeps exactly one command in flight never needs `id` to disambiguate. Set
+  it if you might have more than one in flight, or want to treat a reply
+  that arrives after your own timeout as identifiably stale rather than
+  guessing.
 - The `busy` reply (see Replies above) only covers the due-todo and
   urgent-inbox reminder screens. The RTC alarm-ringing screen and BLE-only
   menu screens still silently defer USB/BLE commands until dispatch resumes
