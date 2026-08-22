@@ -1,10 +1,38 @@
 # Firmware Remaining Work
 
 Updated: 2026-08-22  
-Flashed revision: `2455cb8` (`main`)
+Flashed revision: `ac995ca` (`main`)
 
 ## Newly discovered from desktop/device logs
 
+-1. **P0/P1 — Task watchdog abort + reboot during background sync, cause
+    unknown.** Found by accident 2026-08-22 during an otherwise-unrelated
+    alarm test: after ~2.5 hours and dozens of successful sync cycles in one
+    boot session, the device hard-crashed mid auto-sync:
+    ```
+    E task_wdt: Task watchdog got triggered... main (CPU 0)
+    E task_wdt: Tasks currently running: CPU 0: IDLE0, CPU 1: IDLE1
+    E task_wdt: Aborting.
+    Rebooting...
+    ```
+    Last log line before the ~4s silence-then-crash was
+    `esp-x509-crt-bundle: Certificate validated`, i.e. it was somewhere
+    past the TLS handshake in `sync::sync_now`, most likely reading/parsing
+    the HTTP response or applying it. `main (CPU 0)` not running (both
+    cores idle) at the moment of the check means the main task was truly
+    stuck, not just slow. This is exactly the failure mode "Required
+    physical-device verification" item 4 (repeated Wi-Fi cycles /
+    heap degradation) already flagged as unverified - now there's a live
+    reproduction, just not yet a minimal one. Not related to this pass's
+    alarm/button changes (`sync.rs` wasn't touched). Recovered on its own
+    (watchdog reboot), so not a full brick, but an unexpected mid-session
+    reboot is still a real problem, and it's now unclear whether earlier
+    "no crash" verifications in this doc were just short of the threshold
+    that triggers this. Needs: a way to reproduce faster than "~2.5 hours
+    of normal operation", heap-usage logging over time to check for a
+    leak, and symbolizing the backtrace
+    (`0x403811b3:0x3fcba1b0 0x4212ca3d:0x3fcba1d0 0x4038611b:0x3fcba1f0`)
+    against this build's ELF. Not started.
 0. ~~**P0 — Weekday is off by one everywhere.**~~ **Fixed and verified on
    physical hardware** (2026-08-22, user-reported): device showed Friday on
    a Saturday. Both epoch-to-weekday conversions
@@ -34,22 +62,52 @@ Flashed revision: `2455cb8` (`main`)
 2. ~~**P0 — A persistence failure still presents the reminder.**~~ **Fixed.**
    `remind_due_todos` now returns without ringing when
    `set_todo_reminded_date` fails; see `reminders.rs`.
-3. **P1 — Long reminder screens delay USB replies.** *Partially fixed:* the
-   due-todo and urgent-inbox reminder loops in `reminders.rs` now poll the USB
-   console and reply `{"status":"busy"}` (dropping, not queueing, the command)
-   instead of leaving the client waiting in silence — see the `Busy` reply in
-   `control-protocol.md`. Still open: the RTC alarm-ringing screen
-   (`alarms.rs::ring_until_dismissed`) has the identical blocking pattern but
-   was not wired up to the same fix (out of scope of this pass — it's called
-   from a pre-`DeviceContext` boot path in `main.rs` in addition to the normal
-   runtime path, so threading `UsbConsole` through it needs its own look).
-   BLE is also untouched: `BleControl` isn't reachable from `reminders.rs`'s
-   call path (it's owned by `main.rs`, not `DeviceContext`), so BLE commands
-   during a reminder still get no reply at all, not even `busy`.
+3. **P1 — Long reminder screens delay USB replies.** *Mostly fixed:* the
+   due-todo, urgent-inbox, and (as of this pass) RTC alarm-ringing screens all
+   now poll the USB console and reply `{"status":"busy"}` (dropping, not
+   queueing, the command) instead of leaving the client waiting in silence —
+   see the `Busy` reply in `control-protocol.md`. The shared helper moved to
+   `usb_console::reject_pending_command` so `alarms.rs` doesn't need to depend
+   on `reminders.rs` for it. Still open: BLE is untouched everywhere -
+   `BleControl` isn't reachable from any of these call paths (it's owned by
+   `main.rs`, not `DeviceContext`), so BLE commands during any blocking screen
+   still get no reply at all, not even `busy`.
    **Verified on physical hardware** (2026-08-22): sent `get_status` over USB
    while the due-todo reminder from item 1 was actively ringing and got
-   `{"status":"busy"}` back in a few seconds - well inside the 45s desktop
-   timeout, and no more silent hang.
+   `{"status":"busy"}` back in a few seconds; repeated with a live RTC alarm
+   ring - same result, `{"status":"busy"}` within ~3s of the alarm firing.
+   Well inside the 45s desktop timeout either way, no more silent hang.
+3a. ~~**P0 — Alarm-ring screen's ENTER dismiss was unusable.**~~ **Fixed and
+    verified on physical hardware across 5 real alarm firings** (2026-08-22,
+    user-reported: "闹钟收到了，但是 enter=dismiss 没有效果"). Two compounding bugs
+    in `alarms.rs::ring_until_dismissed`, found live:
+    - The loop polled the button only once per audio tone
+      (`audio::play_sine_stereo` blocks ~210ms per call - see
+      `drain_and_disable`'s unconditional 150ms drain sleep), so a press
+      entirely inside that gap was invisible to the debounce state machine,
+      which only advances when `poll()` runs. First live test: pressed ENTER
+      repeatedly for the entire 300s `MAX_RING_SECS` safety window, zero
+      effect. Fixed with a tight 20ms-granularity poll window between tones,
+      matching `reminders.rs::show_urgent`'s already-working pattern.
+    - Even with that fix, the shared debounced `is_pressed()` state needed a
+      hold of over a second before registering at all - user description:
+      "感觉像在触发菜单的长按手势" (felt like the menu's long-press gesture) - on a
+      button (`key_enter`, GPIO0) this codebase otherwise treats as instant
+      everywhere else. Root cause not fully pinned down (electrical bounce
+      characteristics on this specific button are the leading theory - GPIO0
+      is also shared with the USB auto-reset circuit, though a same-bug
+      repro with zero USB connection open ruled that specific interaction
+      out). For a safety-critical dismiss path a false positive from noise
+      is far cheaper than a false negative (a stuck alarm), so this now
+      reads the raw pin level directly (`Button::is_raw_pressed`, bypassing
+      debounce) instead of going through the shared state machine. Verified
+      fixed: sound stopped and the alarm dismissed within ~0.8s of a normal
+      short press (`Alarm dismissed` -> next `Partial display refresh
+      completed` log line).
+    - A third symptom (screen visibly stuck on "ALARM" for a few seconds
+      after the sound stopped) turned out to be a red herring once measured
+      precisely - see the 0.8s figure above - not a real bug, just the
+      earlier tests' impression before timing it.
 4. ~~**P1 — Command correlation is implicit.**~~ **Fixed and verified on
    physical hardware, both sides** (2026-08-22): commands may now carry an
    optional `id` (any string), echoed back on the reply; omitted `id` means
@@ -129,11 +187,41 @@ issues above.
   effect; worth a doc pass for PC-tool authors on setting `dtr`/`rts` to
   `False` *before* opening the port.
 
+### 2026-08-22 second hardware pass (alarm ring/dismiss, item 3a above)
+
+- Live-fired 5 real one-shot alarms (server-side `Once` schedule, synced down
+  each time) to iterate on the ENTER-dismiss bug - see item 3a for the two
+  root causes found and fixed.
+- AF acknowledgement (`ack_alarm`) and one-shot removal from the alarm store
+  both confirmed working: `Hardware alarm armed: id=... (Once {...})` at
+  sync, `Alarm dismissed` at ring time, then `No enabled alarms; hardware
+  alarm cleared` after - the fired one-shot was correctly dropped and no
+  stale hardware alarm was left armed.
+- This alarm path fired via the *device-already-awake* route
+  (`ctx.rs::poll_alarm`'s `RTC alarm fired while device was awake; ringing`),
+  not the deep-sleep-wake boot path (`main.rs`'s `alarm_fired_at_boot`
+  branch) - the two share `ring_until_dismissed`/`handle_fired_alarm` so the
+  same fixes apply to both, but deep-sleep wake itself (and its ~2 hours
+  later, mid-pass) surfaced item -1's watchdog crash - unrelated to this
+  work but found during it.
+- Ruled out the USB-connection/GPIO0-sharing theory for the slow-dismiss
+  symptom: reran with *zero* USB connection open during the ring and got the
+  identical "single press mutes, doesn't exit; long hold does" symptom,
+  which is what motivated the `is_raw_pressed` fix over trying to tune the
+  shared debounce constants.
+
 ## Required physical-device verification
 
-1. **Alarm end-to-end:** test RTC alarm wake from deep sleep, audible ring,
+1. **Alarm end-to-end:** ~~test RTC alarm wake from deep sleep, audible ring,
    ENTER dismissal, AF acknowledgement, one-shot removal and re-arming of the
-   next recurring alarm.
+   next recurring alarm.~~ *Partially done* (2026-08-22): ring, ENTER
+   dismissal, AF acknowledgement, and one-shot removal all verified on
+   hardware - see item 3a and the second hardware pass above. **Still not
+   verified: wake from actual deep sleep** (every firing this pass happened
+   while the device was already awake, via `ctx.rs::poll_alarm`, not the
+   `main.rs` boot-time `alarm_fired_at_boot` path) **and re-arming the next
+   recurring alarm** (only tested a one-shot `Once` schedule, which gets
+   removed rather than re-armed).
 2. **Alerts outside Home:** verify alarm, urgent Inbox and high-importance Todo
    screens interrupt Calendar, Settings, list/detail and BLE pairing screens,
    then return to a correctly redrawn page.
@@ -142,7 +230,10 @@ issues above.
    Wi-Fi synchronization.
 4. **Repeated Wi-Fi cycles:** leave the device running across many urgent and
    full-sync boundaries and confirm there is no second-connect crash or heap
-   degradation.
+   degradation. **This is no longer purely hypothetical** — see item -1: a
+   watchdog abort+reboot was observed mid-sync after ~2.5 hours / dozens of
+   cycles in one boot session. Root cause not yet found; treat this item as
+   actively failing, not just unverified, until it is.
 5. **Large data sets:** exercise maximum practical alarm, Todo and Inbox lists;
    check pagination, truncation, NVS capacity and e-paper ghosting.
 
@@ -177,8 +268,12 @@ issues above.
 
 ## Release blockers
 
-- Do not claim the offline-alarm feature verified until item 1 in the physical
-  test list passes on the actual NOTE4 hardware.
+- Do not claim the offline-alarm feature verified until physical test item 1
+  passes *in full*, including deep-sleep wake and recurring-alarm re-arm -
+  ring/dismiss/AF-ack/one-shot-removal are done, those two are not.
+- Do not claim long-running stability until item -1's watchdog crash is
+  root-caused and fixed - it's an active, reproduced (if not yet minimized)
+  failure, not a hypothetical.
 - Do not ship OTA until rollback and power-loss behavior are demonstrated.
 - Continue flashing only ESP32-S3 NOTE4 images in DIO mode; NOTE4C firmware and
   QIO mode remain forbidden.
