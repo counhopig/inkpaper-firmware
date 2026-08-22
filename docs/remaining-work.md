@@ -1,14 +1,20 @@
 # Firmware Remaining Work
 
 Updated: 2026-08-22  
-Flashed revision: `ac995ca` (`main`)
+Flashed revision: `ac995ca` (`main`) - unchanged this pass: the 2026-08-22
+code-only pass below (items -1, 3, 6, and "Remaining engineering work" #1-2)
+was verified with `cargo check`/`cargo build --release` (both clean, no
+warnings) and, for the new `logic` crate, `cargo test` on the host, but
+**not flashed to physical hardware** - no device was available. Every claim
+below is marked accordingly; do not read "fixed in code" as "verified on
+hardware."
 
 ## Newly discovered from desktop/device logs
 
--1. **P0/P1 — Task watchdog abort + reboot during background sync, cause
-    unknown.** Found by accident 2026-08-22 during an otherwise-unrelated
-    alarm test: after ~2.5 hours and dozens of successful sync cycles in one
-    boot session, the device hard-crashed mid auto-sync:
+-1. **P0/P1 — Task watchdog abort + reboot during background sync.**
+    Found by accident 2026-08-22 during an otherwise-unrelated alarm test:
+    after ~2.5 hours and dozens of successful sync cycles in one boot
+    session, the device hard-crashed mid auto-sync:
     ```
     E task_wdt: Task watchdog got triggered... main (CPU 0)
     E task_wdt: Tasks currently running: CPU 0: IDLE0, CPU 1: IDLE1
@@ -20,19 +26,37 @@ Flashed revision: `ac995ca` (`main`)
     past the TLS handshake in `sync::sync_now`, most likely reading/parsing
     the HTTP response or applying it. `main (CPU 0)` not running (both
     cores idle) at the moment of the check means the main task was truly
-    stuck, not just slow. This is exactly the failure mode "Required
-    physical-device verification" item 4 (repeated Wi-Fi cycles /
-    heap degradation) already flagged as unverified - now there's a live
-    reproduction, just not yet a minimal one. Not related to this pass's
-    alarm/button changes (`sync.rs` wasn't touched). Recovered on its own
-    (watchdog reboot), so not a full brick, but an unexpected mid-session
-    reboot is still a real problem, and it's now unclear whether earlier
-    "no crash" verifications in this doc were just short of the threshold
-    that triggers this. Needs: a way to reproduce faster than "~2.5 hours
-    of normal operation", heap-usage logging over time to check for a
-    leak, and symbolizing the backtrace
-    (`0x403811b3:0x3fcba1b0 0x4212ca3d:0x3fcba1d0 0x4038611b:0x3fcba1f0`)
-    against this build's ELF. Not started.
+    stuck, not just slow.
+
+    **Root cause (high confidence) and code fix, 2026-08-22 (not yet
+    hardware-verified):** `fetch_and_apply` (`sync.rs`) called
+    `watchdog::feed()` once right after the HTTP status check, then had a
+    single unbroken `io::try_read_full` call to read up to 16KB of response
+    body, followed by JSON parse, three separate NVS blob saves, an I2C RTC
+    alarm reprogram, and two more NVS writes - all with zero further
+    `watchdog::feed()` calls before returning. `CONFIG_ESP_TASK_WDT_TIMEOUT_S`
+    is 10s (`sdkconfig.defaults`); `HttpConfiguration` never set an explicit
+    `timeout`, leaving the native `esp_http_client`'s own default socket
+    timeout in effect instead of a value under our control. A slow/stalling
+    read (worse the longer the boot session ran, if NVS write latency grew
+    with flash fragmentation from repeated saves - consistent with this only
+    showing up after "dozens of successful sync cycles") could plausibly
+    exceed the 10s budget with the main task genuinely blocked on I/O, not
+    spinning - matching the backtrace exactly. `poll_urgent` had the same
+    single-unbroken-read shape on a smaller buffer.
+
+    Fixed: both HTTP clients in `sync.rs` now set an explicit `timeout:
+    Some(Duration::from_secs(8))`, and the response-body read is a
+    watchdog-feeding loop (`read_body_fully`) instead of one blocking call;
+    `watchdog::feed()` was also added after the body read, after JSON
+    parse+validate, and after the NVS/RTC writes that follow. This directly
+    addresses the specific gap found, but the root cause is inferred from
+    logs, not reproduced under a debugger - **do not downgrade this to
+    "fixed" in the Release blockers section below until a multi-hour soak
+    (see `docs/hardware-smoke-test.md` §1) runs clean on real hardware.**
+    Heap-usage logging and backtrace symbolization were not done (the fix
+    above made them unnecessary to proceed, but revisit if the soak still
+    reproduces a crash).
 0. ~~**P0 — Weekday is off by one everywhere.**~~ **Fixed and verified on
    physical hardware** (2026-08-22, user-reported): device showed Friday on
    a Saturday. Both epoch-to-weekday conversions
@@ -77,6 +101,18 @@ Flashed revision: `ac995ca` (`main`)
    `{"status":"busy"}` back in a few seconds; repeated with a live RTC alarm
    ring - same result, `{"status":"busy"}` within ~3s of the alarm firing.
    Well inside the 45s desktop timeout either way, no more silent hang.
+   **BLE gap closed in code, 2026-08-22 (not yet hardware-verified):**
+   `DeviceContext` now owns a `ble_control: &mut Option<BleControl>` field
+   (a reference to the slot `main.rs` already owned, not the `BleControl`
+   itself - its lifetime still differs, populated only while the pairing
+   screen is open) instead of BLE being threaded as a separate parameter
+   that never reached the blocking screens. `ble_control::reject_pending_command`
+   mirrors the USB version; every call site that already called
+   `usb_console::reject_pending_command` (due-todo, urgent-inbox, RTC
+   alarm-ringing) now also calls the BLE version when BLE is active. Needs a
+   hardware pass with the pairing screen open during a ring/reminder to
+   confirm a queued BLE command actually gets `busy` back - see
+   `docs/hardware-smoke-test.md` §2.
 3a. ~~**P0 — Alarm-ring screen's ENTER dismiss was unusable.**~~ **Fixed and
     verified on physical hardware across 5 real alarm firings** (2026-08-22,
     user-reported: "闹钟收到了，但是 enter=dismiss 没有效果"). Two compounding bugs
@@ -127,8 +163,9 @@ Flashed revision: `ac995ca` (`main`)
    valid status replies. This is not a firmware failure, but the UI/logging
    should coalesce identical startup probes so users do not mistake them for
    duplicate actions.
-6. **P2 — `esp-idf-svc` 0.52.1 always associates with PMF advertised as
-   unsupported, ignoring `ClientConfiguration.pmf_cfg`.** Root-caused
+6. ~~**P2 — `esp-idf-svc` 0.52.1 always associates with PMF advertised as
+   unsupported, ignoring `ClientConfiguration.pmf_cfg`.**~~ **Fixed in code,
+   2026-08-22 (not yet re-verified on the failing hardware).** Root-caused
    2026-08-22 on hardware: a router with WPA2/WPA3-mixed + PMF-required
    rejected the device shortly after association (`assoc -> init` right
    after the `Wi-Fi connected` log line, before DHCP could run), while the
@@ -137,12 +174,16 @@ Flashed revision: `ac995ca` (`main`)
    `TryFrom<&ClientConfiguration> for Newtype<wifi_sta_config_t>`, which
    hardcodes `wifi_pmf_config_t { capable: false, required: false }` and
    never reads `conf.pmf_cfg` — so nothing `wifi.rs::connect()` sets on the
-   Rust side can change it. Workaround for now: use a WPA2-only network (or
-   WPA2/WPA3-mixed with PMF optional, not required). A real fix needs either
-   an `esp-idf-svc` upgrade past this bug, or bypassing `set_configuration()`
-   for STA the same way `connect()`/`disconnect()` already bypass the
-   wrapper - build and pass a `wifi_config_t` with `pmf_cfg.capable = true`
-   directly to `esp_wifi_set_config()`. Not started.
+   Rust side can change it. Fixed by doing exactly the bypass this item
+   originally proposed: `WifiManager::connect()` now reads back the STA
+   config the wrapper just wrote (`esp_wifi_get_config`), patches only
+   `pmf_cfg` to `{capable: true, required: false}` (PMF optional - a
+   superset of the old hardcoded `false/false`, so PMF-disabled APs are
+   unaffected), and writes it back directly via `esp_wifi_set_config()` -
+   the same raw FFI call the wrapper itself uses, matching how
+   `connect()`/`disconnect()` already bypass the wrapper elsewhere in this
+   file. Needs a hardware pass against the specific PMF-required router that
+   originally failed - see `docs/hardware-smoke-test.md` §1.
 
 The same log also confirms that consecutive scan-free Wi-Fi connections work
 within one boot, HTTPS certificate validation succeeds, and a full sync applies
@@ -232,17 +273,44 @@ issues above.
    full-sync boundaries and confirm there is no second-connect crash or heap
    degradation. **This is no longer purely hypothetical** — see item -1: a
    watchdog abort+reboot was observed mid-sync after ~2.5 hours / dozens of
-   cycles in one boot session. Root cause not yet found; treat this item as
-   actively failing, not just unverified, until it is.
+   cycles in one boot session. A high-confidence root cause was found and a
+   fix applied in code 2026-08-22 (missing `watchdog::feed()` calls across a
+   network-read-then-NVS-write span, plus no explicit HTTP timeout); treat
+   this item as still actively failing until a multi-hour soak on real
+   hardware runs clean under the fixed code - see
+   `docs/hardware-smoke-test.md` §1.
 5. **Large data sets:** exercise maximum practical alarm, Todo and Inbox lists;
    check pagination, truncation, NVS capacity and e-paper ghosting.
 
 ## Remaining engineering work
 
-1. Add host-runnable tests for alarm ordering/recurrence, scheduler boundary
-   transitions, reminder de-duplication, ID allocation and sync merge rules.
-2. Add a repeatable hardware smoke-test checklist or serial-log harness for
-   boot, synchronization, alarm and BLE/USB recovery.
+1. ~~Add host-runnable tests for alarm ordering/recurrence, scheduler
+   boundary transitions, reminder de-duplication, ID allocation and sync
+   merge rules.~~ **Done, 2026-08-22.** The bin crate cross-compiles only
+   for `xtensa-esp32s3-espidf` and links `esp-idf-sys` (needs the ESP-IDF
+   SDK toolchain to build at all), so no part of it could ever run under
+   `cargo test`. Pulled every listed category's *pure* logic out into a new
+   sibling crate, `logic/` (package `inkwash-logic`, path-dependency of
+   `rust-firmware`, zero ESP-IDF deps) - deliberately placed outside
+   `rust-firmware/` so it doesn't inherit `rust-firmware/.cargo/config.toml`'s
+   `target = "xtensa-esp32s3-espidf"` override and builds for the host by
+   default. `rust-firmware`'s modules (`rtc.rs`, `alarms.rs`, `todos.rs`,
+   `inbox.rs`, `sync.rs`, `ctx.rs`, `reminders.rs`) now re-export or call
+   into it instead of keeping their own copies, so it's the single source
+   of truth, not a parallel implementation that can drift. Covers:
+   `datetime` (epoch/weekday math - includes a regression test for the item
+   0 weekday bug, checked against an independent Zeller's-congruence
+   reference rather than the same formula under test), `alarm_schedule`
+   (`Repeat`/`StoredAlarm`, recurrence, `next_id` allocation),
+   `sync_validate` (`validate_repeat`/`validate_date`/
+   `validate_sync_response`), `reminder_dedup` (due-todo "already reminded
+   today" and inbox pending-read merge/ack), and `scheduler` (wall-clock
+   boundary-index math). 40 tests, all passing: `cd logic && cargo test`.
+   `rust-firmware` itself still builds clean for the real target
+   (`cargo check --release` / `cargo build --release`, verified).
+2. ~~Add a repeatable hardware smoke-test checklist or serial-log harness for
+   boot, synchronization, alarm and BLE/USB recovery.~~ **Done, 2026-08-22:**
+   see `docs/hardware-smoke-test.md`.
 3. ~~Fix stale ESP-IDF application metadata.~~ *Worked around* (2026-08-22):
    the ESP-IDF app descriptor's `App version`/`Compile time` fields are still
    stale (confirmed on hardware: still printed `v0.3.0-14-g71062c9-dirty`
@@ -272,8 +340,10 @@ issues above.
   passes *in full*, including deep-sleep wake and recurring-alarm re-arm -
   ring/dismiss/AF-ack/one-shot-removal are done, those two are not.
 - Do not claim long-running stability until item -1's watchdog crash is
-  root-caused and fixed - it's an active, reproduced (if not yet minimized)
-  failure, not a hypothetical.
+  confirmed fixed on hardware - a high-confidence root cause was found and a
+  fix applied in code 2026-08-22, but it's inferred from logs, not
+  reproduced under a debugger; treat it as an active, reproduced failure
+  until a multi-hour soak (`docs/hardware-smoke-test.md` §1) runs clean.
 - Do not ship OTA until rollback and power-loss behavior are demonstrated.
 - Continue flashing only ESP32-S3 NOTE4 images in DIO mode; NOTE4C firmware and
   QIO mode remain forbidden.

@@ -127,10 +127,10 @@ pub fn write_reply(reply: &control::Reply, id: Option<&str>) {
 /// executing it. Called from every full-screen blocking loop (due-todo and
 /// urgent-inbox reminders, the RTC alarm ring screen) so a PC tool gets an
 /// immediate, unambiguous reply instead of silence until the screen is
-/// dismissed - see docs/control-protocol.md's `Busy` reply. BLE has the same
-/// silent-defer limitation but isn't wired up here yet (`BleControl` isn't
-/// reachable from these call paths - it's owned by `main.rs`, not
-/// `DeviceContext`); see remaining-work.md.
+/// dismissed - see docs/control-protocol.md's `Busy` reply. Every one of
+/// these call sites also calls `ble_control::reject_pending_command` (BLE is
+/// now reachable via `DeviceContext::ble_control`), so BLE gets the same
+/// `busy` reply instead of silence.
 pub fn reject_pending_command(usb: &mut UsbConsole) {
     if let Some((id, _cmd)) = usb.poll_command() {
         log::info!("Blocking screen active; replying busy to a queued USB command");

@@ -160,7 +160,16 @@ fn main() -> Result<()> {
     let alarm_fired_at_boot = power::wake_cause() == power::WakeCause::RtcAlarm;
     if alarm_fired_at_boot {
         log::info!("Woke from RTC alarm; ringing");
-        alarms::handle_fired_alarm(&mut board, &alarm_store, &mut usb_console, clock.as_ref())?;
+        // BLE is never up this early (only started on entering the pairing
+        // screen), so there is nothing to poll yet - `None` is accurate,
+        // not a shortcut.
+        alarms::handle_fired_alarm(
+            &mut board,
+            &alarm_store,
+            &mut usb_console,
+            None,
+            clock.as_ref(),
+        )?;
     }
 
     // Keep the PCF8563's single hardware alarm slot pointed at whichever
@@ -264,6 +273,15 @@ fn main() -> Result<()> {
         }
     };
 
+    // Owned here (not inside `DeviceContext`) because its lifetime differs
+    // from the rest of the bundled state: populated only while the BLE
+    // pairing screen is open, torn down on leaving it. `DeviceContext` holds
+    // a `&mut` to this slot rather than the `BleControl` itself, so every
+    // blocking screen that goes through it (reminders, alarm ring) can still
+    // reach BLE to reply `busy` to a queued command - see `ctx.rs`'s doc
+    // comment and item 3 in `docs/remaining-work.md`.
+    let mut ble_control: Option<ble_control::BleControl> = None;
+
     // Bundle the long-lived state into one context, then run the main loop
     // through it instead of threading board/stores/wifi individually.
     let mut ctx = DeviceContext {
@@ -274,6 +292,7 @@ fn main() -> Result<()> {
         todo_store: &todo_store,
         inbox_store: &inbox_store,
         usb_console: &mut usb_console,
+        ble_control: &mut ble_control,
         sync_scheduler: SyncScheduler::new(clock.as_ref(), &counters),
         alarm_scheduler: AlarmScheduler::new(clock.as_ref(), alarm_fired_at_boot),
     };
@@ -286,7 +305,6 @@ fn main() -> Result<()> {
     // at the top of the hour. Initialized to the boot-time boundary so the
     // first aligned boundary after boot fires (and a never-synced device
     // syncs on its first urgent-poll boundary).
-    let mut ble_control: Option<ble_control::BleControl> = None;
     loop {
         watchdog::feed();
         let mut dirty: Vec<Rect> = Vec::new();
@@ -340,13 +358,16 @@ fn main() -> Result<()> {
         }
 
         // Poll BLE for incoming commands (if BLE is active), dispatch them, and send replies.
-        if let Some(ble) = &ble_control {
-            if let Some((id, cmd)) = ble.poll_command() {
-                let needs_full_redraw = matches!(cmd, control::Command::SyncNow);
-                let reply = control::dispatch(&mut ctx, cmd, clock.as_ref());
-                if needs_full_redraw && matches!(reply, control::Reply::Ok) {
-                    dirty.push(FULL_SCREEN_RECT);
-                }
+        // `poll_command` returns an owned `(id, Command)`, ending the borrow
+        // of `ctx.ble_control` before `dispatch` needs `&mut ctx` - the same
+        // shape `ble_pairing_screen` uses.
+        if let Some((id, cmd)) = ctx.ble_control.as_ref().and_then(|ble| ble.poll_command()) {
+            let needs_full_redraw = matches!(cmd, control::Command::SyncNow);
+            let reply = control::dispatch(&mut ctx, cmd, clock.as_ref());
+            if needs_full_redraw && matches!(reply, control::Reply::Ok) {
+                dirty.push(FULL_SCREEN_RECT);
+            }
+            if let Some(ble) = ctx.ble_control.as_ref() {
                 ble.write_reply(&reply, id.as_deref());
             }
         }
@@ -371,7 +392,7 @@ fn main() -> Result<()> {
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("UP long pressed; opening navigation");
-                    screens::open_navigation(&mut ctx, clock.as_ref(), &mut ble_control);
+                    screens::open_navigation(&mut ctx, clock.as_ref());
                     dirty.push(FULL_SCREEN_RECT);
                 }
                 ButtonEvent::Released => {}
@@ -385,7 +406,7 @@ fn main() -> Result<()> {
                 }
                 ButtonEvent::LongPressed => {
                     log::info!("DOWN long pressed; opening navigation");
-                    screens::open_navigation(&mut ctx, clock.as_ref(), &mut ble_control);
+                    screens::open_navigation(&mut ctx, clock.as_ref());
                     dirty.push(FULL_SCREEN_RECT);
                 }
                 ButtonEvent::Released => {}

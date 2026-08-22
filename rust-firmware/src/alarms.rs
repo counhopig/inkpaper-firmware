@@ -6,14 +6,14 @@
 use anyhow::{anyhow, Result};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use esp_idf_svc::systime::EspSystemTime;
-use serde::{Deserialize, Serialize};
 use std::thread;
 use std::time::Duration;
 
+use crate::ble_control::BleControl;
 use crate::board::Note4Board;
 use crate::button::POLL_INTERVAL_MS;
 use crate::canvas::Canvas;
-use crate::rtc::{is_leap, AlarmRegs, DateTime, Pcf8563};
+use crate::rtc::{AlarmRegs, DateTime, Pcf8563};
 use crate::usb_console::{reject_pending_command, UsbConsole};
 use crate::{ui, watchdog};
 
@@ -27,51 +27,17 @@ const BLOB_BUF_LEN: usize = 1024;
 /// Safety bound so an unattended/stuck-button alarm cannot ring forever.
 const MAX_RING_SECS: u64 = 300;
 
-/// Recurrence schedule, wire-compatible with the server's
-/// `models::Repeat`. Externally tagged by serde: `"Daily"`, `{"Weekly":
-/// {"days": [0, 2, 4]}}`, `{"Monthly": {"days": [1, 15]}}`, or `{"Once":
-/// {"year": 2026, "month": 8, "day": 19}}`. Weekdays are 0=Sunday ..
-/// 6=Saturday (matching the RTC's `DateTime.weekday` and JS
-/// `Date.getDay()`); month days are 1..=31.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum Repeat {
-    /// Every day at the alarm's time.
-    Daily,
-    /// Days of the week at the alarm's time. Never empty once created.
-    Weekly { days: Vec<u8> },
-    /// Days of the month at the alarm's time. Never empty once created.
-    Monthly { days: Vec<u8> },
-    /// Fires once on this calendar date, then the caller is expected to
-    /// drop it from the store (see `main.rs`'s ack-and-rearm flow).
-    Once { year: u16, month: u8, day: u8 },
-}
-
-impl Repeat {
-    /// Whether this schedule covers the given calendar date. `weekday`
-    /// is 0=Sunday..6=Saturday.
-    pub fn fires_on(&self, year: u16, month: u8, day: u8, weekday: u8) -> bool {
-        match self {
-            Repeat::Daily => true,
-            Repeat::Weekly { days } => days.contains(&weekday),
-            Repeat::Monthly { days } => days.contains(&day),
-            Repeat::Once {
-                year: y,
-                month: m,
-                day: d,
-            } => *y == year && *m == month && *d == day,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct StoredAlarm {
-    pub id: u8,
-    pub hour: u8,
-    pub minute: u8,
-    pub repeat: Repeat,
-    pub enabled: bool,
-    pub label: String,
-}
+/// `Repeat`/`StoredAlarm` and every pure ordering/recurrence/ID-allocation
+/// function below (down to `program_hardware_alarm`) live in `inkwash-logic`
+/// so they can be unit-tested on the host - this crate is the single source
+/// of truth, re-exported here so every existing `alarms::Repeat` /
+/// `alarms::StoredAlarm` / `alarms::next_due` (etc.) call site keeps working
+/// unchanged. See "Remaining engineering work" #1 in
+/// `docs/remaining-work.md`.
+pub use inkwash_logic::alarm_schedule::{
+    date_from_days, days_since_epoch, days_until, is_expired_once, next_due, next_id,
+    next_occurrence_date, Repeat, StoredAlarm,
+};
 
 pub struct AlarmStore {
     nvs: EspDefaultNvs,
@@ -166,9 +132,10 @@ pub fn handle_fired_alarm(
     board: &mut Note4Board,
     alarm_store: &AlarmStore,
     usb: &mut UsbConsole,
+    ble: Option<&mut BleControl>,
     now: Option<&DateTime>,
 ) -> Result<()> {
-    ring_until_dismissed(board, usb)?;
+    ring_until_dismissed(board, usb, ble)?;
     board.rtc.ack_alarm()?;
 
     if let Some(now) = now {
@@ -184,7 +151,11 @@ pub fn handle_fired_alarm(
 
 /// Draws the alarm screen, then alternates short tone bursts with polling
 /// ENTER until dismissed or the safety timeout elapses.
-fn ring_until_dismissed(board: &mut Note4Board, usb: &mut UsbConsole) -> Result<()> {
+fn ring_until_dismissed(
+    board: &mut Note4Board,
+    usb: &mut UsbConsole,
+    mut ble: Option<&mut BleControl>,
+) -> Result<()> {
     let canvas = board.display.canvas_mut();
     canvas.clear();
     ui::header(canvas, "ALARM");
@@ -199,6 +170,9 @@ fn ring_until_dismissed(board: &mut Note4Board, usb: &mut UsbConsole) -> Result<
     loop {
         watchdog::feed();
         reject_pending_command(usb);
+        if let Some(ble) = ble.as_deref_mut() {
+            crate::ble_control::reject_pending_command(ble);
+        }
         board.key_enter.poll();
         if board.key_enter.is_raw_pressed() {
             while board.key_enter.poll().is_some() {}
@@ -229,6 +203,9 @@ fn ring_until_dismissed(board: &mut Note4Board, usb: &mut UsbConsole) -> Result<
         loop {
             watchdog::feed();
             reject_pending_command(usb);
+            if let Some(ble) = ble.as_deref_mut() {
+                crate::ble_control::reject_pending_command(ble);
+            }
             board.key_enter.poll();
             if board.key_enter.is_pressed() {
                 while board.key_enter.poll().is_some() {}
@@ -241,162 +218,6 @@ fn ring_until_dismissed(board: &mut Note4Board, usb: &mut UsbConsole) -> Result<
             thread::sleep(Duration::from_millis(POLL_INTERVAL_MS as u64));
         }
     }
-}
-
-/// Absolute day number (proleptic Gregorian, epoch 1970-01-01) - only used
-/// to order alarms against each other, matching the calendar math already
-/// in `rtc::DateTime::from_unix`.
-pub(crate) fn days_since_epoch(year: u16, month: u8, day: u8) -> i64 {
-    let mut days: i64 = 0;
-    for y in 1970..year as i64 {
-        days += if is_leap(y) { 366 } else { 365 };
-    }
-    let month_days = if is_leap(year as i64) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    for m in month_days.iter().take(month as usize - 1) {
-        days += *m as i64;
-    }
-    days + day as i64 - 1
-}
-
-/// Days per month for a given year (leap-aware).
-fn month_lengths(year: i64) -> [i64; 12] {
-    if is_leap(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    }
-}
-
-/// Calendar date (year, month, day) for an absolute day number relative to
-/// 1970-01-01. Inverse of `days_since_epoch`.
-pub(crate) fn date_from_days(mut days: i64) -> (u16, u8, u8) {
-    let mut year = 1970i64;
-    loop {
-        let dim = if is_leap(year) { 366 } else { 365 };
-        if days < dim {
-            break;
-        }
-        days -= dim;
-        year += 1;
-    }
-    for (idx, dim) in month_lengths(year).iter().enumerate() {
-        if days < *dim {
-            return (year as u16, (idx + 1) as u8, (days + 1) as u8);
-        }
-        days -= *dim;
-    }
-    unreachable!("date_from_days ran past a year's day count")
-}
-
-/// Weekday (0=Sunday..6=Saturday) for an absolute day number. 1970-01-01
-/// was a Thursday (4).
-fn weekday_from_days(days: i64) -> u8 {
-    ((days + 4).rem_euclid(7)) as u8
-}
-
-/// The next calendar date (year, month, day, weekday) that `repeat` covers,
-/// at or after `now`'s date. Non-empty schedules always match within ~62
-/// days, so the scan is bounded and the fallback is unreachable in practice.
-pub(crate) fn next_occurrence_date(
-    repeat: &Repeat,
-    hour: u8,
-    minute: u8,
-    now: &DateTime,
-) -> (u16, u8, u8, u8) {
-    let now_days = days_since_epoch(now.year, now.month, now.day);
-    let occurrence_minutes = hour as i64 * 60 + minute as i64;
-    let now_minutes = now.hour as i64 * 60 + now.minute as i64;
-    for offset in 0..370 {
-        let days = now_days + offset;
-        let (year, month, day) = date_from_days(days);
-        let weekday = weekday_from_days(days);
-        if repeat.fires_on(year, month, day, weekday)
-            && !(offset == 0 && occurrence_minutes <= now_minutes)
-        {
-            return (year, month, day, weekday);
-        }
-    }
-    (now.year, now.month, now.day, now.weekday)
-}
-
-/// Whole days from `now` until the given calendar date (0 = today,
-/// negative = already passed). Used by the Home screen for the
-/// "in N days" alarm countdown.
-pub(crate) fn days_until(year: u16, month: u8, day: u8, now: &DateTime) -> i64 {
-    days_since_epoch(year, month, day) - days_since_epoch(now.year, now.month, now.day)
-}
-
-/// Minutes from `now` until `alarm` next fires, or `i64::MAX` if it's a
-/// `Once` alarm whose date has already passed (a live store shouldn't have
-/// these - `main.rs` drops fired one-shots - but `next_due` stays correct
-/// even if one lingers).
-fn minutes_until(alarm: &StoredAlarm, now: &DateTime) -> i64 {
-    let now_minutes = now.hour as i64 * 60 + now.minute as i64;
-    let alarm_minutes = alarm.hour as i64 * 60 + alarm.minute as i64;
-    match &alarm.repeat {
-        Repeat::Daily => {
-            let mut delta = alarm_minutes - now_minutes;
-            if delta < 0 {
-                delta += 24 * 60;
-            }
-            delta
-        }
-        Repeat::Weekly { .. } | Repeat::Monthly { .. } => {
-            let now_days = days_since_epoch(now.year, now.month, now.day);
-            for offset in 0..370 {
-                let days = now_days + offset;
-                let (year, month, day) = date_from_days(days);
-                let weekday = weekday_from_days(days);
-                if !alarm.repeat.fires_on(year, month, day, weekday) {
-                    continue;
-                }
-                if offset == 0 && alarm_minutes <= now_minutes {
-                    // Today's occurrence already passed; keep scanning for
-                    // the next matching date.
-                    continue;
-                }
-                return offset * 24 * 60 + (alarm_minutes - now_minutes);
-            }
-            i64::MAX
-        }
-        Repeat::Once { year, month, day } => {
-            let now_days = days_since_epoch(now.year, now.month, now.day);
-            let alarm_days = days_since_epoch(*year, *month, *day);
-            let delta = (alarm_days - now_days) * 24 * 60 + (alarm_minutes - now_minutes);
-            if delta < 0 {
-                i64::MAX
-            } else {
-                delta
-            }
-        }
-    }
-}
-
-/// First unused wire-compatible id. Searching gaps avoids overflow at 255 and
-/// prevents the duplicate id that a wrapping `max + 1` would create.
-pub fn next_id(alarms: &[StoredAlarm]) -> Option<u8> {
-    (u8::MIN..=u8::MAX).find(|candidate| !alarms.iter().any(|a| a.id == *candidate))
-}
-
-/// True for a `Once` alarm whose date has already passed relative to `now`
-/// - i.e. it fired (or was skipped over) and should be dropped from the
-///   store so it doesn't linger and confuse `next_due` forever. Daily alarms
-///   recur on their own and are never "expired".
-pub fn is_expired_once(alarm: &StoredAlarm, now: &DateTime) -> bool {
-    matches!(alarm.repeat, Repeat::Once { .. })
-        && matches!(minutes_until(alarm, now), i64::MAX | ..=0)
-}
-
-/// Picks the chronologically nearest enabled alarm relative to `now`.
-pub fn next_due<'a>(alarms: &'a [StoredAlarm], now: &DateTime) -> Option<&'a StoredAlarm> {
-    alarms
-        .iter()
-        .filter(|a| a.enabled)
-        .min_by_key(|a| minutes_until(a, now))
 }
 
 /// Timer wake needed to make a future-month one-shot alarm fully offline.

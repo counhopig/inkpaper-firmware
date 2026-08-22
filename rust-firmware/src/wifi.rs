@@ -127,6 +127,41 @@ impl WifiManager {
             self.wifi.start().context("failed to start Wi-Fi")?;
         }
 
+        // Work around esp-idf-svc 0.52.1 hardcoding PMF to
+        // `{capable: false, required: false}` in its
+        // `TryFrom<&ClientConfiguration> for Newtype<wifi_sta_config_t>`
+        // (`esp-idf-svc-0.52.1/src/wifi.rs`), which `set_configuration()`
+        // just used above - it never reads `ClientConfiguration.pmf_cfg`,
+        // so nothing settable on the Rust side changes it. Root-caused on
+        // hardware (2026-08-22, see item 6 in `docs/remaining-work.md`): a
+        // WPA2/WPA3-mixed + PMF-required router accepted association but
+        // then rejected the device (`assoc -> init` right after `Wi-Fi
+        // connected`, before DHCP) because the driver advertised itself as
+        // PMF-incapable. Same same router in WPA2-only mode connected
+        // cleanly, isolating this to the PMF field specifically. Patched
+        // here by reading back the config the wrapper just wrote and
+        // rewriting only the PMF bits directly via the same
+        // `esp_wifi_set_config()` the wrapper itself calls - `capable:
+        // true, required: false` (PMF optional) is a superset of what the
+        // hardcoded `false/false` allowed: still associates with
+        // PMF-disabled APs, but no longer refused by a PMF-required or
+        // PMF-optional one.
+        unsafe {
+            let mut sta_config: esp_idf_svc::sys::wifi_config_t = std::mem::zeroed();
+            esp_idf_svc::sys::esp!(esp_idf_svc::sys::esp_wifi_get_config(
+                esp_idf_svc::sys::wifi_interface_t_WIFI_IF_STA,
+                &mut sta_config,
+            ))
+            .map_err(|e| anyhow!("esp_wifi_get_config (PMF patch) failed: {e:?}"))?;
+            sta_config.sta.pmf_cfg.capable = true;
+            sta_config.sta.pmf_cfg.required = false;
+            esp_idf_svc::sys::esp!(esp_idf_svc::sys::esp_wifi_set_config(
+                esp_idf_svc::sys::wifi_interface_t_WIFI_IF_STA,
+                &mut sta_config,
+            ))
+            .map_err(|e| anyhow!("esp_wifi_set_config (PMF patch) failed: {e:?}"))?;
+        }
+
         // No scan before connecting. Credentials always come from the
         // desktop's `SetWifi` command, so the target SSID is known and
         // `esp_wifi_connect()` connects to the configured SSID directly.

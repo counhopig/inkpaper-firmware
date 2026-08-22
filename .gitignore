@@ -13,6 +13,7 @@ sdkconfig.old
 # Rust build artifacts
 rust-firmware/target/
 rust-firmware/.embuild/
+logic/target/
 tools/*/target/
 tools/*/*.png
 

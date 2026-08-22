@@ -13,48 +13,16 @@ use anyhow::{anyhow, Result};
 use esp_idf_svc::nvs::{EspDefaultNvs, EspDefaultNvsPartition};
 use serde::{Deserialize, Serialize};
 
+/// `InboxKind`/`Priority`/`InboxItem` live in `inkwash-logic` (re-exported
+/// here), alongside the pending-read merge/dedup rules `save`/`mark_read`/
+/// `ack_read` below call into instead of inlining - see "Remaining
+/// engineering work" #1 in `docs/remaining-work.md`.
+pub use inkwash_logic::inbox_item::{InboxItem, InboxKind, Priority};
+
 const NAMESPACE: &str = "inkwash_inbox";
 const KEY_ITEMS: &str = "items";
 const KEY_PENDING: &str = "pending";
 const BLOB_BUF_LEN: usize = 4096;
-
-/// Inbox notification kind, wire-compatible with the server's `InboxKind`
-/// (`"alert"`/`"event"`/`"info"`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InboxKind {
-    Alert,
-    Event,
-    Info,
-}
-
-/// Inbox notification priority, wire-compatible with the server's `Priority`
-/// (`"normal"`/`"high"`). `High` alerts trigger an urgent full-screen
-/// reminder with an insistent tone; the sync client long-polls for them so
-/// they surface in real time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum Priority {
-    #[default]
-    Normal,
-    High,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct InboxItem {
-    /// Device-visible stable id (server `seq`, monotonic).
-    pub id: u64,
-    pub kind: InboxKind,
-    #[serde(default)]
-    pub priority: Priority,
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub when: Option<i64>,
-    #[serde(default)]
-    pub read: bool,
-}
 
 /// Maximum number of items kept locally; anything beyond this is dropped on
 /// save so a large server inbox can't overflow NVS.
@@ -121,19 +89,12 @@ impl InboxStore {
     /// dropped; the rest are preserved so they can still be acked later.
     pub fn save(&self, items: &[InboxItem]) -> Result<()> {
         let pending = self.pending_read()?;
-        let pending: Vec<u64> = pending
-            .into_iter()
-            .filter(|seq| items.iter().any(|it| it.id == *seq && !it.read))
-            .collect();
+        let pending = inkwash_logic::reminder_dedup::merge_pending_read(&pending, items);
         let mut owned: Vec<InboxItem> = items.to_vec();
         owned.truncate(MAX_ITEMS);
         // Preserve the locally-read flag for anything the server still sends
         // back as unread but that we've already opened this session.
-        for item in owned.iter_mut() {
-            if pending.contains(&item.id) {
-                item.read = true;
-            }
-        }
+        inkwash_logic::reminder_dedup::apply_pending_read(&mut owned, &pending);
         // NVS blobs are capped at `BLOB_BUF_LEN`, so long bodies and many
         // items must be trimmed to fit: cut each body to `MAX_BODY_CHARS`,
         // then drop the *oldest* items (the server sends newest-first) until
@@ -183,10 +144,7 @@ impl InboxStore {
     /// them (`inbox_read_acked`).
     pub fn ack_read(&self, acked: &[u64]) -> Result<()> {
         let pending = self.pending_read()?;
-        let remaining: Vec<u64> = pending
-            .into_iter()
-            .filter(|seq| !acked.contains(seq))
-            .collect();
+        let remaining = inkwash_logic::reminder_dedup::ack_pending_read(&pending, acked);
         self.write_blob(KEY_PENDING, &remaining)
     }
 

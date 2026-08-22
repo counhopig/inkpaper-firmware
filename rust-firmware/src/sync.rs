@@ -10,24 +10,41 @@
 use anyhow::{anyhow, Result};
 use embedded_svc::http::client::Client as HttpClient;
 use embedded_svc::http::Method;
-use embedded_svc::utils::io;
 use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection};
-use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use serde::Serialize;
+use std::time::Duration;
 
-use crate::alarms::{self, AlarmStore, StoredAlarm};
-use crate::inbox::{InboxItem, InboxStore};
+use crate::alarms::{self, AlarmStore};
+use crate::inbox::InboxStore;
 use crate::rtc::{DateTime, Pcf8563};
 use crate::storage::PersistedCounters;
-use crate::todos::{Importance, Todo, TodoStore};
+use crate::todos::{Importance, TodoStore};
 use crate::watchdog;
 use crate::wifi;
+
+/// `SyncResponse` and `validate_sync_response` (the sync merge rules) live
+/// in `inkwash-logic` so they can be unit-tested on the host - see
+/// "Remaining engineering work" #1 in `docs/remaining-work.md`. This crate
+/// is the single source of truth; everything below just wires the result
+/// into HTTP + NVS.
+use inkwash_logic::sync_validate::{validate_sync_response, SyncResponse};
 
 /// Response bodies from a compliant server are small (alarms/todos are
 /// themselves capped to a couple KB each in NVS - see `alarms::BLOB_BUF_LEN`
 /// / `todos::BLOB_BUF_LEN`); the inbox adds up to 20 small items. A fixed
 /// buffer avoids a heap-growing read loop for a payload this bounded.
 const RESPONSE_BUF_LEN: usize = 16384;
+
+/// Explicit socket timeout for every HTTP client used in this module.
+/// `Configuration::timeout` defaults to `None`, which leaves the native
+/// `esp_http_client`'s own default in effect rather than a value under our
+/// control - not guaranteed to be shorter than `CONFIG_ESP_TASK_WDT_TIMEOUT_S`
+/// (10s; see `sdkconfig.defaults`). Set well under that budget so a
+/// stalled/slow connection surfaces as a clean `Err` instead of leaving the
+/// main task blocked in a read long enough for the task watchdog to fire -
+/// see item -1 in `docs/remaining-work.md` for the live reboot this is meant
+/// to prevent.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Outcome of a bidirectional sync after the merged server state is applied.
 #[derive(Clone, Debug)]
@@ -41,116 +58,6 @@ pub enum SyncOutcome {
     },
 }
 
-/// Sync response body shape, deserialized directly from the server's JSON -
-/// `StoredAlarm`/`Todo` already derive `Deserialize`, so no separate wire
-/// DTO is needed. See `docs/sync-api.md` for the exact contract.
-#[derive(Debug, Deserialize)]
-struct SyncResponse {
-    #[serde(default)]
-    alarms: Vec<StoredAlarm>,
-    #[serde(default)]
-    todos: Vec<Todo>,
-    #[serde(default)]
-    inbox: Vec<InboxItem>,
-    #[serde(default)]
-    inbox_read_acked: Vec<u64>,
-    #[serde(default)]
-    inbox_truncated: bool,
-}
-
-/// Rejects malformed or internally inconsistent server state before any NVS
-/// blob is replaced. Wire DTOs deliberately use plain integers for protocol
-/// compatibility; the firmware must establish their invariants at this
-/// boundary instead of letting invalid dates become array indices or RTC BCD.
-fn validate_sync_response(response: &SyncResponse) -> Result<()> {
-    let mut alarm_ids = HashSet::new();
-    for alarm in &response.alarms {
-        if !alarm_ids.insert(alarm.id) {
-            return Err(anyhow!("duplicate alarm id {}", alarm.id));
-        }
-        if alarm.hour > 23 || alarm.minute > 59 {
-            return Err(anyhow!(
-                "alarm {} has invalid time {:02}:{:02}",
-                alarm.id,
-                alarm.hour,
-                alarm.minute
-            ));
-        }
-        validate_repeat(&alarm.repeat)
-            .map_err(|err| anyhow!("alarm {} has invalid repeat: {err}", alarm.id))?;
-    }
-
-    let mut todo_ids = HashSet::new();
-    for todo in &response.todos {
-        if !todo_ids.insert(todo.id) {
-            return Err(anyhow!("duplicate todo id {}", todo.id));
-        }
-        if let Some(due) = todo.due_date {
-            validate_date(due.year, due.month, due.day)
-                .map_err(|err| anyhow!("todo {} has invalid due date: {err}", todo.id))?;
-        }
-        if let Some(repeat) = &todo.repeat {
-            if matches!(repeat, alarms::Repeat::Once { .. }) {
-                return Err(anyhow!("todo {} uses unsupported Once repeat", todo.id));
-            }
-            validate_repeat(repeat)
-                .map_err(|err| anyhow!("todo {} has invalid repeat: {err}", todo.id))?;
-        }
-    }
-
-    let mut inbox_ids = HashSet::new();
-    for item in &response.inbox {
-        if !inbox_ids.insert(item.id) {
-            return Err(anyhow!("duplicate inbox id {}", item.id));
-        }
-    }
-
-    // Preflight the two fixed-size stores before writing either one. Without
-    // this, an oversized todo response could replace alarms and then fail,
-    // leaving a mixed-generation snapshot behind.
-    if serde_json::to_vec(&response.alarms)?.len() > 1024 {
-        return Err(anyhow!("alarm list exceeds device storage capacity"));
-    }
-    if serde_json::to_vec(&response.todos)?.len() > 2048 {
-        return Err(anyhow!("todo list exceeds device storage capacity"));
-    }
-    Ok(())
-}
-
-fn validate_repeat(repeat: &alarms::Repeat) -> Result<()> {
-    match repeat {
-        alarms::Repeat::Daily => Ok(()),
-        alarms::Repeat::Weekly { days } => {
-            if days.is_empty() || days.iter().any(|day| *day > 6) {
-                return Err(anyhow!("weekly days must be non-empty and within 0..=6"));
-            }
-            Ok(())
-        }
-        alarms::Repeat::Monthly { days } => {
-            if days.is_empty() || days.iter().any(|day| !(1..=31).contains(day)) {
-                return Err(anyhow!("monthly days must be non-empty and within 1..=31"));
-            }
-            Ok(())
-        }
-        alarms::Repeat::Once { year, month, day } => validate_date(*year, *month, *day),
-    }
-}
-
-fn validate_date(year: u16, month: u8, day: u8) -> Result<()> {
-    if !(2000..=2099).contains(&year) || !(1..=12).contains(&month) {
-        return Err(anyhow!("date must be within 2000-01-01..=2099-12-31"));
-    }
-    let days = match month {
-        2 if crate::rtc::is_leap(year as i64) => 29,
-        2 => 28,
-        4 | 6 | 9 | 11 => 30,
-        _ => 31,
-    };
-    if !(1..=days).contains(&day) {
-        return Err(anyhow!("day {day} is invalid for {year:04}-{month:02}"));
-    }
-    Ok(())
-}
 
 #[derive(Debug, Serialize)]
 struct DeviceSyncRequest {
@@ -177,6 +84,28 @@ struct DeviceTodoState {
     importance: Option<Importance>,
 }
 
+/// Reads `read`'s body into `buf` until it fills, the peer closes the
+/// connection (a `0`-byte read), or the per-call socket read times out
+/// (`HTTP_TIMEOUT`, surfaced as `Err` by the underlying connection). Feeds
+/// the task watchdog between every read so a connection that keeps trickling
+/// small chunks in - never hitting the idle timeout, but also never handing
+/// control back for long enough between chunks - still cannot starve the
+/// TWDT the way one unbroken `try_read_full` call could.
+fn read_body_fully(response: &mut impl embedded_svc::io::Read, buf: &mut [u8]) -> Result<usize> {
+    let mut offset = 0;
+    while offset < buf.len() {
+        watchdog::feed();
+        let n = response
+            .read(&mut buf[offset..])
+            .map_err(|e| anyhow!("HTTP response read failed: {e:?}"))?;
+        if n == 0 {
+            break;
+        }
+        offset += n;
+    }
+    Ok(offset)
+}
+
 /// Fetches alarms and todos from `server_url`, applying conditional-request
 /// semantics. Uploads local mutable flags first and returns the merged
 /// server data's counts and new ETag. Any HTTP error, TLS error, or
@@ -197,6 +126,7 @@ pub fn fetch_and_apply(
 
     let config = HttpConfiguration {
         crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
+        timeout: Some(HTTP_TIMEOUT),
         ..Default::default()
     };
     let mut client = HttpClient::wrap(
@@ -284,13 +214,24 @@ pub fn fetch_and_apply(
 
     let new_etag = response.header("etag").map(|s| s.to_string());
 
+    // Read the body in a watchdog-feeding loop rather than one unbroken
+    // `io::try_read_full` call. A single blocking read of up to 16KB, with
+    // no `watchdog::feed()` until the *next* one (previously not until this
+    // whole function returned), was the prime suspect for item -1 in
+    // `docs/remaining-work.md`: a live task-watchdog abort+reboot observed
+    // mid-sync, right after "Certificate validated", with both cores idle
+    // (main task genuinely blocked, not spinning) - exactly what a stalled
+    // socket read plus a growing NVS write cost (worse after many sync
+    // cycles' worth of flash wear) would produce against a 10s TWDT budget.
     let mut buf = [0u8; RESPONSE_BUF_LEN];
-    let bytes_read = io::try_read_full(&mut response, &mut buf).map_err(|e| e.0)?;
+    let bytes_read = read_body_fully(&mut response, &mut buf)?;
     let body = &buf[..bytes_read];
+    watchdog::feed();
 
     let parsed: SyncResponse = serde_json::from_slice(body)
         .map_err(|e| anyhow!("sync response JSON decode failed: {e}"))?;
     validate_sync_response(&parsed).map_err(|e| anyhow!("sync response validation failed: {e}"))?;
+    watchdog::feed();
 
     alarm_store
         .save(&parsed.alarms)
@@ -304,6 +245,7 @@ pub fn fetch_and_apply(
     inbox_store
         .ack_read(&parsed.inbox_read_acked)
         .map_err(|e| anyhow!("failed to ack inbox reads: {e}"))?;
+    watchdog::feed();
     // The merged server state now reflects everything we uploaded, so the
     // pending local changes are spent. Cleared only here, after a
     // successful round-trip - a failed sync keeps them for the retry.
@@ -318,6 +260,7 @@ pub fn fetch_and_apply(
     todo_store
         .clear_dirty()
         .map_err(|e| anyhow!("failed to clear todo dirty set: {e}"))?;
+    watchdog::feed();
 
     log::info!(
         "Sync applied: {} alarms, {} todos, {} inbox (truncated={})",
@@ -476,6 +419,7 @@ pub fn poll_urgent(counters: &PersistedCounters, wifi_mgr: &mut wifi::WifiManage
     let result = (|| -> Result<bool> {
         let config = HttpConfiguration {
             crt_bundle_attach: Some(esp_idf_svc::sys::esp_crt_bundle_attach),
+            timeout: Some(HTTP_TIMEOUT),
             ..Default::default()
         };
         let mut client = HttpClient::wrap(
@@ -515,7 +459,7 @@ pub fn poll_urgent(counters: &PersistedCounters, wifi_mgr: &mut wifi::WifiManage
             return Err(anyhow!("urgent poll failed: HTTP {}", response.status()));
         }
         let mut buf = [0u8; 256];
-        let bytes_read = io::try_read_full(&mut response, &mut buf).map_err(|e| e.0)?;
+        let bytes_read = read_body_fully(&mut response, &mut buf)?;
         let parsed: serde_json::Value = serde_json::from_slice(&buf[..bytes_read])
             .map_err(|e| anyhow!("urgent poll JSON decode failed: {e}"))?;
         Ok(parsed

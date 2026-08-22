@@ -1,19 +1,30 @@
 //! DeviceContext: a single bundle of the firmware's long-lived shared state,
 //! so screen/sync/control functions pass one `&mut DeviceContext` instead of
-//! threading eight individual arguments through every call site. `clock` and
-//! `ble_control` are intentionally NOT here: `clock` is a transient value
-//! re-read from the RTC, and `ble_control` has a distinct lifetime (owned by
-//! the main loop and torn down when leaving the pairing screen), so they stay
-//! as explicit parameters where they're needed.
+//! threading individual arguments through every call site. `clock` is
+//! intentionally NOT here: it's a transient value re-read from the RTC each
+//! poll, so it stays an explicit parameter where it's needed.
+//!
+//! `ble_control` holds a `&'a mut Option<BleControl>` (not a `BleControl`
+//! directly) because its *contents* have a distinct lifetime from the rest
+//! of this struct - owned by the main loop, populated only while the BLE
+//! pairing screen is open, and torn down (`= None`) when leaving it. Storing
+//! the reference to the slot rather than threading `&mut Option<BleControl>`
+//! as a separate parameter everywhere means every blocking screen that goes
+//! through `DeviceContext` automatically gets the chance to reply `busy` to
+//! a queued BLE command instead of leaving BLE the one control channel with
+//! no reply at all during a ring/reminder - see item 3 in
+//! `docs/remaining-work.md`.
 //!
 //! The store fields are `&'a` (immutable) because their methods all take
 //! `&self` (the underlying NVS handles have internal mutability); only
-//! `board`, `wifi_mgr`, and `usb_console` need `&'a mut`. This lets a function read a store
-//! and mutate the board in the same scope without fighting the borrow checker.
+//! `board`, `wifi_mgr`, `usb_console`, and `ble_control` need `&'a mut`. This
+//! lets a function read a store and mutate the board in the same scope
+//! without fighting the borrow checker.
 
 use std::time::{Duration, Instant};
 
 use crate::alarms::AlarmStore;
+use crate::ble_control::BleControl;
 use crate::board::Note4Board;
 use crate::control::{self, Command, Reply};
 use crate::inbox::InboxStore;
@@ -56,8 +67,8 @@ impl SyncScheduler {
         let unix = now.map(|dt| dt.to_unix()).unwrap_or(0);
         let interval = counters.sync_interval_minutes().unwrap_or(60) as u64;
         Self {
-            last_urgent_boundary: unix / 30,
-            last_full_boundary: unix / (interval * 60),
+            last_urgent_boundary: inkwash_logic::scheduler::boundary_index(unix, 30),
+            last_full_boundary: inkwash_logic::scheduler::boundary_index(unix, interval * 60),
             never_synced: counters.last_sync_epoch().unwrap_or(None).is_none(),
             last_ui_poll: Instant::now(),
         }
@@ -74,6 +85,7 @@ pub struct DeviceContext<'a> {
     pub todo_store: &'a TodoStore,
     pub inbox_store: &'a InboxStore,
     pub usb_console: &'a mut UsbConsole,
+    pub ble_control: &'a mut Option<BleControl>,
     pub sync_scheduler: SyncScheduler,
     pub alarm_scheduler: AlarmScheduler,
 }
@@ -135,6 +147,7 @@ impl DeviceContext<'_> {
             self.todo_store,
             self.inbox_store,
             self.usb_console,
+            self.ble_control.as_mut(),
             now,
         )
     }
@@ -181,6 +194,7 @@ impl DeviceContext<'_> {
                     self.board,
                     self.alarm_store,
                     self.usb_console,
+                    self.ble_control.as_mut(),
                     Some(now),
                 ) {
                     log::error!("Failed to handle live RTC alarm: {err}");
@@ -216,16 +230,23 @@ impl DeviceContext<'_> {
 
         let interval = self.counters.sync_interval_minutes().unwrap_or(60) as u64;
         let unix = now.to_unix();
-        let urgent_boundary = unix / 30;
-        let full_boundary = unix / (interval * 60);
-        let urgent_due = urgent_boundary != self.sync_scheduler.last_urgent_boundary;
-        let full_due = full_boundary != self.sync_scheduler.last_full_boundary;
+        let urgent_due = inkwash_logic::scheduler::boundary_advanced(
+            unix,
+            30,
+            self.sync_scheduler.last_urgent_boundary,
+        );
+        let full_due = inkwash_logic::scheduler::boundary_advanced(
+            unix,
+            interval * 60,
+            self.sync_scheduler.last_full_boundary,
+        );
         if !urgent_due && !full_due {
             return false;
         }
 
         if urgent_due {
-            self.sync_scheduler.last_urgent_boundary = urgent_boundary;
+            self.sync_scheduler.last_urgent_boundary =
+                inkwash_logic::scheduler::boundary_index(unix, 30);
             match crate::sync::poll_urgent(self.counters, self.wifi_mgr) {
                 Ok(true) => {
                     log::info!("Urgent message available; syncing");
@@ -237,7 +258,8 @@ impl DeviceContext<'_> {
         }
 
         if full_due || (self.sync_scheduler.never_synced && urgent_due) {
-            self.sync_scheduler.last_full_boundary = full_boundary;
+            self.sync_scheduler.last_full_boundary =
+                inkwash_logic::scheduler::boundary_index(unix, interval * 60);
             log::info!("Aligned sync due (interval {interval} min); syncing");
             return self.run_full_sync(now);
         }

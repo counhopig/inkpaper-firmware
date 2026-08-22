@@ -7,13 +7,14 @@ use std::time::Duration;
 
 use esp_idf_svc::systime::EspSystemTime;
 
+use crate::ble_control::BleControl;
 use crate::board::Note4Board;
 use crate::button::{ButtonEvent, POLL_INTERVAL_MS};
 use crate::inbox::InboxStore;
 use crate::rtc::DateTime;
 use crate::screens;
 use crate::storage::PersistedCounters;
-use crate::todos::{Importance, Todo, TodoStore};
+use crate::todos::{Todo, TodoStore};
 use crate::usb_console::{reject_pending_command, UsbConsole};
 use crate::{ui, watchdog};
 
@@ -27,10 +28,11 @@ pub fn poll(
     todo_store: &TodoStore,
     inbox_store: &InboxStore,
     usb: &mut UsbConsole,
+    mut ble: Option<&mut BleControl>,
     now: &DateTime,
 ) -> bool {
-    let urgent_shown = remind_urgent_inbox(board, inbox_store, usb);
-    let todo_shown = remind_due_todos(board, counters, todo_store, usb, now);
+    let urgent_shown = remind_urgent_inbox(board, inbox_store, usb, ble.as_deref_mut());
+    let todo_shown = remind_due_todos(board, counters, todo_store, usb, ble, now);
     urgent_shown || todo_shown
 }
 
@@ -39,11 +41,14 @@ fn remind_due_todos(
     counters: &PersistedCounters,
     todo_store: &TodoStore,
     usb: &mut UsbConsole,
+    ble: Option<&mut BleControl>,
     now: &DateTime,
 ) -> bool {
-    let date_key = format!("{:04}{:02}{:02}", now.year, now.month, now.day);
+    use inkwash_logic::reminder_dedup::{
+        already_reminded_today, due_high_importance_todos, reminder_date_key,
+    };
     match counters.todo_reminded_date() {
-        Ok(Some(prev)) if prev == date_key => return false,
+        Ok(prev) if already_reminded_today(prev.as_deref(), now) => return false,
         Ok(_) => {}
         Err(err) => log::warn!("Failed to read todo reminder date: {err}"),
     }
@@ -51,34 +56,27 @@ fn remind_due_todos(
     let Ok(list) = todo_store.load() else {
         return false;
     };
-    let due: Vec<&Todo> = list
-        .iter()
-        .filter(|todo| {
-            if todo.done || todo.importance != Importance::High {
-                return false;
-            }
-            match &todo.repeat {
-                Some(repeat) => repeat.fires_on(now.year, now.month, now.day, now.weekday),
-                None => todo.due_date.is_some_and(|date| {
-                    date.year == now.year && date.month == now.month && date.day == now.day
-                }),
-            }
-        })
-        .collect();
+    let due: Vec<&Todo> = due_high_importance_todos(&list, now);
     if due.is_empty() {
         return false;
     }
 
+    let date_key = reminder_date_key(now);
     if let Err(err) = counters.set_todo_reminded_date(&date_key) {
         log::warn!("Failed to record todo reminder date; not reminding: {err}");
         return false;
     }
     log::info!("{} high-importance todo(s) due today; reminding", due.len());
-    show_due_todos(board, &due, usb);
+    show_due_todos(board, &due, usb, ble);
     true
 }
 
-fn show_due_todos(board: &mut Note4Board, due: &[&Todo], usb: &mut UsbConsole) {
+fn show_due_todos(
+    board: &mut Note4Board,
+    due: &[&Todo],
+    usb: &mut UsbConsole,
+    mut ble: Option<&mut BleControl>,
+) {
     let canvas = board.display.canvas_mut();
     canvas.clear();
     ui::header(canvas, "TODOS DUE");
@@ -104,6 +102,9 @@ fn show_due_todos(board: &mut Note4Board, due: &[&Todo], usb: &mut UsbConsole) {
     loop {
         watchdog::feed();
         reject_pending_command(usb);
+        if let Some(ble) = ble.as_deref_mut() {
+            crate::ble_control::reject_pending_command(ble);
+        }
         if board
             .key_enter
             .poll()
@@ -119,6 +120,7 @@ fn remind_urgent_inbox(
     board: &mut Note4Board,
     inbox_store: &InboxStore,
     usb: &mut UsbConsole,
+    ble: Option<&mut BleControl>,
 ) -> bool {
     let Ok(list) = inbox_store.load() else {
         return false;
@@ -139,11 +141,16 @@ fn remind_urgent_inbox(
         .map(|item| screens::truncate_prop(&item.title, 330))
         .collect();
     log::info!("{} urgent inbox message(s) to show", titles.len());
-    show_urgent(board, &titles, usb);
+    show_urgent(board, &titles, usb, ble);
     true
 }
 
-fn show_urgent(board: &mut Note4Board, titles: &[String], usb: &mut UsbConsole) {
+fn show_urgent(
+    board: &mut Note4Board,
+    titles: &[String],
+    usb: &mut UsbConsole,
+    mut ble: Option<&mut BleControl>,
+) {
     let canvas = board.display.canvas_mut();
     canvas.clear();
     ui::header(canvas, "URGENT");
@@ -167,6 +174,9 @@ fn show_urgent(board: &mut Note4Board, titles: &[String], usb: &mut UsbConsole) 
     loop {
         watchdog::feed();
         reject_pending_command(usb);
+        if let Some(ble) = ble.as_deref_mut() {
+            crate::ble_control::reject_pending_command(ble);
+        }
         board.key_enter.poll();
         if board.key_enter.is_pressed() {
             while board.key_enter.poll().is_some() {}
@@ -191,6 +201,9 @@ fn show_urgent(board: &mut Note4Board, titles: &[String], usb: &mut UsbConsole) 
         loop {
             watchdog::feed();
             reject_pending_command(usb);
+            if let Some(ble) = ble.as_deref_mut() {
+                crate::ble_control::reject_pending_command(ble);
+            }
             board.key_enter.poll();
             if board.key_enter.is_pressed() {
                 while board.key_enter.poll().is_some() {}

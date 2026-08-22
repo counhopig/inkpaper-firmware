@@ -3,94 +3,16 @@ use esp_idf_svc::sys::TickType_t;
 
 use crate::board::SharedI2c;
 
+/// `DateTime` and `is_leap` are pure calendar/epoch math with no I2C or
+/// other hardware dependency, so they live in `inkwash-logic` where they can
+/// be unit-tested on the host (see "Remaining engineering work" #1 in
+/// `docs/remaining-work.md`) - this crate is the single source of truth,
+/// re-exported here so every existing `crate::rtc::DateTime` /
+/// `crate::rtc::is_leap` call site keeps working unchanged.
+pub use inkwash_logic::datetime::{is_leap, DateTime};
+
 pub const PCF8563_ADDR: u8 = 0x51;
 const I2C_TIMEOUT_TICKS: TickType_t = 100; // 100 ms RTOS ticks
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DateTime {
-    pub year: u16,
-    pub month: u8,
-    pub day: u8,
-    pub weekday: u8,
-    pub hour: u8,
-    pub minute: u8,
-    pub second: u8,
-    pub voltage_low: bool,
-}
-
-impl DateTime {
-    pub fn from_unix(epoch: u64) -> Self {
-        let secs = (epoch % 86400) as u32;
-        let mut days = (epoch / 86400) as i64;
-        let mut year: i64 = 1970;
-        loop {
-            let leap = is_leap(year);
-            let dy = if leap { 366 } else { 365 };
-            if days < dy {
-                break;
-            }
-            days -= dy;
-            year += 1;
-        }
-        let leap = is_leap(year);
-        let month_days = if leap {
-            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        } else {
-            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        };
-        let mut month = 1;
-        for &dm in &month_days {
-            if days < dm {
-                break;
-            }
-            days -= dm;
-            month += 1;
-        }
-        let day = days as u8 + 1;
-        let hour = (secs / 3600) as u8;
-        let minute = ((secs % 3600) / 60) as u8;
-        let second = (secs % 60) as u8;
-        let weekday = ((epoch / 86400 + 4) % 7) as u8; // 1970-01-01 was Thursday (0=Sunday..6=Saturday)
-        Self {
-            year: year as u16,
-            month,
-            day,
-            weekday,
-            hour,
-            minute,
-            second,
-            voltage_low: false,
-        }
-    }
-
-    pub fn to_unix(self) -> u64 {
-        let mut days = 0u64;
-        for year in 1970..self.year as i64 {
-            days += if is_leap(year) { 366 } else { 365 };
-        }
-        let month_days = if is_leap(self.year as i64) {
-            [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        } else {
-            [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        };
-        days += month_days
-            .iter()
-            .take(self.month.saturating_sub(1) as usize)
-            .map(|days| *days as u64)
-            .sum::<u64>();
-        days += self.day.saturating_sub(1) as u64;
-        days * 86_400 + self.hour as u64 * 3_600 + self.minute as u64 * 60 + self.second as u64
-    }
-
-    pub fn shifted_minutes(self, minutes: i32) -> Self {
-        let shifted = (self.to_unix() as i64 + minutes as i64 * 60).max(0) as u64;
-        Self::from_unix(shifted)
-    }
-}
-
-pub(crate) fn is_leap(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
-}
 
 fn bcd_to_bin(b: u8) -> u8 {
     ((b >> 4) & 0x0F) * 10 + (b & 0x0F)

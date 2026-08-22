@@ -55,11 +55,7 @@ pub fn truncate_prop(text: &str, max_width: usize) -> String {
 /// all the way out to Home. Always leaves the caller (Home) to redraw its
 /// own full screen afterwards - none of these screens know how to render
 /// the home screen themselves.
-pub fn open_menu(
-    ctx: &mut DeviceContext,
-    now: Option<&DateTime>,
-    ble_control: &mut Option<crate::ble_control::BleControl>,
-) {
+pub fn open_menu(ctx: &mut DeviceContext, now: Option<&DateTime>) {
     let items = [
         "SYNC NOW".to_string(),
         "SYNC INTERVAL".to_string(),
@@ -81,7 +77,7 @@ pub fn open_menu(
             }
             PickResult::Selected(1) => sync_interval_screen(ctx, now),
             PickResult::Selected(2) => {
-                ble_pairing_screen(ctx, now, ble_control);
+                ble_pairing_screen(ctx, now);
                 false
             }
             PickResult::Selected(3) => {
@@ -106,7 +102,7 @@ pub fn open_menu(
         // Long UP/DOWN inside Settings opens the GO TO drawer, matching
         // every other page (from here you can reach Todos/Calendar/etc.).
         if want_nav {
-            open_navigation(ctx, now, ble_control);
+            open_navigation(ctx, now);
             return;
         }
     }
@@ -292,11 +288,7 @@ fn pick_navigation(
 
 /// Opens the global navigation directory. Both long UP and long DOWN enter
 /// this directory; short UP/DOWN selects a destination and ENTER opens it.
-pub fn open_navigation(
-    ctx: &mut DeviceContext,
-    now: Option<&DateTime>,
-    ble_control: &mut Option<crate::ble_control::BleControl>,
-) {
+pub fn open_navigation(ctx: &mut DeviceContext, now: Option<&DateTime>) {
     loop {
         let Some(selected) = pick_navigation(ctx, now, Page::Home) else {
             return;
@@ -310,10 +302,10 @@ pub fn open_navigation(
                     3 => Page::Alarms,
                     _ => Page::Todos,
                 };
-                browse_page(ctx, page, now, ble_control);
+                browse_page(ctx, page, now);
                 return;
             }
-            5 => open_menu(ctx, now, ble_control),
+            5 => open_menu(ctx, now),
             _ => {}
         }
     }
@@ -321,13 +313,7 @@ pub fn open_navigation(
 
 /// Runs one peer content page. Long UP/DOWN opens the navigation overlay;
 /// cancelling that overlay restores this page.
-#[allow(clippy::too_many_arguments)]
-fn browse_page(
-    ctx: &mut DeviceContext,
-    mut page: Page,
-    now: Option<&DateTime>,
-    ble_control: &mut Option<crate::ble_control::BleControl>,
-) {
+fn browse_page(ctx: &mut DeviceContext, mut page: Page, now: Option<&DateTime>) {
     let mut live_now = now.copied();
     let mut rtc_poll_ticks = 0u8;
     let mut alarm_selected = 0usize;
@@ -446,7 +432,7 @@ fn browse_page(
                     Some(2) => page = Page::Inbox,
                     Some(3) => page = Page::Alarms,
                     Some(4) => page = Page::Todos,
-                    Some(5) => open_menu(ctx, live_now.as_ref(), ble_control),
+                    Some(5) => open_menu(ctx, live_now.as_ref()),
                     Some(_) | None => {}
                 }
                 needs_redraw = true;
@@ -1238,15 +1224,11 @@ fn sync_now_screen(ctx: &mut DeviceContext, now: Option<&DateTime>) {
     }
 }
 
-fn ble_pairing_screen(
-    ctx: &mut DeviceContext,
-    now: Option<&DateTime>,
-    ble_control: &mut Option<crate::ble_control::BleControl>,
-) {
+fn ble_pairing_screen(ctx: &mut DeviceContext, now: Option<&DateTime>) {
     // Start BLE advertising on entry to the pairing screen.
     match crate::ble_control::BleControl::start() {
         Ok(ble) => {
-            *ble_control = Some(ble);
+            *ctx.ble_control = Some(ble);
             log::info!("BLE pairing screen: started advertising");
 
             // Display the pairing screen with instructions.
@@ -1268,9 +1250,10 @@ fn ble_pairing_screen(
             let mut last_alarm_poll = std::time::Instant::now();
             loop {
                 let _ = ctx.poll_usb_control(now);
-                if let Some((id, cmd)) = ble_control.as_ref().and_then(|ble| ble.poll_command()) {
+                if let Some((id, cmd)) = ctx.ble_control.as_ref().and_then(|ble| ble.poll_command())
+                {
                     let reply = crate::control::dispatch(ctx, cmd, now);
-                    if let Some(ble) = ble_control.as_ref() {
+                    if let Some(ble) = ctx.ble_control.as_ref() {
                         ble.write_reply(&reply, id.as_deref());
                     }
                 }
@@ -1310,7 +1293,7 @@ fn ble_pairing_screen(
     }
 
     // Stop BLE advertising on exit from the pairing screen.
-    *ble_control = None;
+    *ctx.ble_control = None;
     log::info!("BLE pairing screen: stopped advertising, reclaimed RAM");
 }
 

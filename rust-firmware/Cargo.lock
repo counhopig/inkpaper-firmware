@@ -855,6 +855,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "inkwash-logic"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "inkwash-note4"
 version = "0.4.0"
 dependencies = [
@@ -864,6 +872,7 @@ dependencies = [
  "esp-idf-svc",
  "esp32-nimble",
  "heapless 0.9.3",
+ "inkwash-logic",
  "log",
  "serde",
  "serde_json",
