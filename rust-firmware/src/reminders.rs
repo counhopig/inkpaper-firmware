@@ -67,7 +67,8 @@ fn remind_due_todos(
     }
 
     if let Err(err) = counters.set_todo_reminded_date(&date_key) {
-        log::warn!("Failed to record todo reminder date: {err}");
+        log::warn!("Failed to record todo reminder date; not reminding: {err}");
+        return false;
     }
     log::info!("{} high-importance todo(s) due today; reminding", due.len());
     show_due_todos(board, &due);

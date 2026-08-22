@@ -11,7 +11,9 @@ const KEY_TIMEZONE_OFFSET: &str = "timezone_min";
 const KEY_SYNC_INTERVAL_MIN: &str = "sync_interval_min";
 const KEY_LAST_SYNC_EPOCH: &str = "last_sync_epoch";
 const KEY_RTC_ALIGN_EPOCH: &str = "rtc_align_epoch";
-const KEY_TODO_REMINDED_DATE: &str = "todo_reminded_date";
+/// ESP-IDF NVS keys are limited to 15 characters; `todo_reminded_date` (18
+/// chars) silently failed every write with `ESP_ERR_NVS_KEY_TOO_LONG`.
+const KEY_TODO_REMINDED_DATE: &str = "todo_rem_date";
 
 /// Maximum length of the NVS strings used for Wi-Fi credentials.
 /// ESP32-S3 NVS limits a single string item to ~4000 bytes; 64 chars is
