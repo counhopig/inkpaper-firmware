@@ -89,7 +89,10 @@ fn main() -> Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    log::info!("Inkpaper NOTE4 Rust bring-up starting");
+    log::info!(
+        "Inkwash NOTE4 Rust bring-up starting (git {})",
+        env!("GIT_REV")
+    );
     if let Err(err) = watchdog::subscribe() {
         log::warn!("Task watchdog subscribe failed: {err}");
     }

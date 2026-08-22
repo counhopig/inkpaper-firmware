@@ -455,7 +455,7 @@ fn maybe_align_rtc(counters: &PersistedCounters, rtc: &mut Pcf8563, now: &DateTi
 }
 
 /// Lightweight urgent-message poll: connects, sends a `POST` with the
-/// `X-Inkpaper-Poll` header, reads a tiny `{"urgent": bool}` response, and
+/// `X-Inkwash-Poll` header, reads a tiny `{"urgent": bool}` response, and
 /// disconnects. The server answers immediately (no hold), so the firmware can
 /// call this on a short timer to detect high-priority messages without
 /// keeping a long connection open or blocking the main loop for long.

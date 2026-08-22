@@ -99,7 +99,7 @@ impl BleControl {
             .lock()
             .set_data(
                 BLEAdvertisementData::new()
-                    .name("Inkpaper")
+                    .name("Inkwash")
                     .add_service_uuid(uuid128!(SERVICE_UUID)),
             )
             .map_err(|e| anyhow!("BLE set advertisement data failed: {e:?}"))?;
