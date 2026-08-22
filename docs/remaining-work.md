@@ -1,7 +1,7 @@
 # Firmware Remaining Work
 
 Updated: 2026-08-22  
-Flashed revision: `65a9be7` (`main`)
+Flashed revision: `9e7e9b3` (`main`)
 
 ## Newly discovered from desktop/device logs
 
@@ -125,12 +125,16 @@ issues above.
    transitions, reminder de-duplication, ID allocation and sync merge rules.
 2. Add a repeatable hardware smoke-test checklist or serial-log harness for
    boot, synchronization, alarm and BLE/USB recovery.
-3. Fix stale ESP-IDF application metadata. The boot log's `App version` and
-   `Compile time` can come from the cached `esp-idf-sys` CMake build instead of
-   the Rust firmware revision just linked and flashed. Embed the Git revision
-   from `build.rs` or force the application descriptor to rebuild. Observed
-   directly 2026-08-22: booted a `65a9be7` flash and the log still printed
-   `App version: v0.3.0-14-g71062c9-dirty` (a commit two pushes back).
+3. ~~Fix stale ESP-IDF application metadata.~~ *Worked around* (2026-08-22):
+   the ESP-IDF app descriptor's `App version`/`Compile time` fields are still
+   stale (confirmed on hardware: still printed `v0.3.0-14-g71062c9-dirty`
+   after flashing `9e7e9b3`) and forcing them to refresh would mean touching
+   `esp-idf-sys`'s CMake caching, out of scope here. Instead `build.rs` now
+   embeds a fresh `git describe` as `GIT_REV`, logged once at boot
+   (`main.rs`) - verified on hardware printing the correct
+   `v0.3.0-18-g672e229-dirty` on the same boot where the ESP-IDF field was
+   stale. Use the firmware's own log line, not `App version`, to identify
+   what's actually running.
 4. Replace machine-specific ESP-IDF, Python and rust-analyzer paths with a
    documented local bootstrap/configuration mechanism. *Partially done*
    (2026-08-22): `LIBCLANG_PATH` no longer needs a hardcoded per-developer
